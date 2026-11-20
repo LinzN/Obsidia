@@ -10,6 +10,7 @@ mod device;
 mod firmware;
 mod gui;
 mod theme;
+mod updater;
 
 use clap::Parser;
 

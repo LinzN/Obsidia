@@ -59,6 +59,13 @@ fn tool_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// True if `name` is an executable somewhere in PATH.
+pub fn command_exists(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
+        .unwrap_or(false)
+}
+
 /// Locate an external tool, returning its full path.
 pub fn find_tool(name: &str) -> Option<PathBuf> {
     let file = if cfg!(windows) {

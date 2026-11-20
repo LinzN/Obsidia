@@ -2,6 +2,7 @@
 
 use crate::device::{self, Device, Mode};
 use crate::firmware::{self, Progress};
+use crate::updater;
 use anyhow::{anyhow, bail, Result};
 use clap::Subcommand;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -54,6 +55,12 @@ pub enum Cmd {
     Recovery,
     /// Kick the device out of recovery mode
     ExitRecovery,
+    /// Check GitHub for a newer version and install it
+    Update {
+        /// Only check, do not install
+        #[arg(long)]
+        check: bool,
+    },
     /// Create a local backup via idevicebackup2
     Backup { dir: Option<PathBuf> },
 }
@@ -246,6 +253,35 @@ pub fn run(cmd: Cmd, sel: Option<&str>) -> Result<()> {
                 .ok_or_else(|| anyhow!("no device in recovery/DFU mode found"))?;
             device::exit_recovery()?;
             println!("Reboot to normal mode requested.");
+        }
+        Cmd::Update { check } => {
+            println!("Current version: {}", updater::CURRENT_VERSION);
+            let Some(update) = updater::check()? else {
+                println!("Obsidia is up to date.");
+                return Ok(());
+            };
+            println!(
+                "New version available: {} ({})",
+                update.version, update.page
+            );
+            if check {
+                return Ok(());
+            }
+            if !confirm("Download and install it now?")? {
+                return Ok(());
+            }
+            let pb = ProgressBar::new(0);
+            pb.set_style(ProgressStyle::with_template(
+                "[{bar:40.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec}",
+            )?);
+            let cancel = AtomicBool::new(false);
+            let path = updater::download(&update, &cancel, |done, total| {
+                pb.set_length(total);
+                pb.set_position(done);
+            })?;
+            pb.finish_and_clear();
+            updater::install(&path)?;
+            println!("Installer started: {}", path.display());
         }
         Cmd::Backup { dir } => {
             check_tools()?;

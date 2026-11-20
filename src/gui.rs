@@ -3,6 +3,7 @@
 use crate::device::{self, Device, Mode};
 use crate::firmware::{self, CatalogEntry, DeviceInfo, Firmware, Progress};
 use crate::theme::{self, Surface, ACCENT, DANGER, GREEN, ORANGE, RED};
+use crate::updater::{self, Update};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use egui_extras::{Column, TableBuilder};
 use indicatif::HumanBytes;
@@ -56,6 +57,9 @@ enum Msg {
     Log(String),
     JobStatus(String),
     JobDone(Result<String, String>),
+    UpdateChecked(Result<Option<Update>, String>, bool),
+    UpdateProgress(u64, u64),
+    UpdateDownloaded(Result<PathBuf, String>),
 }
 
 /// Sender that also wakes up the UI.
@@ -116,6 +120,19 @@ struct FlashView {
     result: Option<Result<String, String>>,
 }
 
+enum UpdateState {
+    Checking,
+    UpToDate,
+    Available(Update),
+    Downloading {
+        update: Update,
+        done: u64,
+        total: u64,
+        cancel: Arc<AtomicBool>,
+    },
+    Failed(Option<Update>, String),
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Device,
@@ -169,6 +186,10 @@ struct App {
     show_log: bool,
     pending_flash: Option<FlashRequest>,
     notice: Option<(String, bool)>,
+
+    update: Option<UpdateState>,
+    update_dismissed: bool,
+    show_release_notes: bool,
 }
 
 impl App {
@@ -205,7 +226,13 @@ impl App {
             show_log: false,
             pending_flash: None,
             notice: None,
+            update: None,
+            update_dismissed: false,
+            show_release_notes: false,
         };
+        if updater::auto_check_enabled() {
+            app.check_for_updates(false);
+        }
         app.refresh_local_files();
         app
     }
@@ -346,6 +373,56 @@ impl App {
                     if let Some(job) = &mut self.job {
                         job.status = s;
                         job.percent = None;
+                    }
+                }
+                Msg::UpdateChecked(res, manual) => {
+                    self.update = Some(match res {
+                        Ok(Some(update)) => {
+                            self.log(format!("Update available: Obsidia {}", update.version));
+                            self.update_dismissed = false;
+                            UpdateState::Available(update)
+                        }
+                        Ok(None) => {
+                            if manual {
+                                self.notice = Some(("Obsidia is up to date.".into(), false));
+                            }
+                            UpdateState::UpToDate
+                        }
+                        Err(e) => {
+                            self.log(format!("Update check failed: {e}"));
+                            if manual {
+                                self.notice = Some((format!("Update check failed: {e}"), true));
+                            }
+                            UpdateState::Failed(None, e)
+                        }
+                    });
+                }
+                Msg::UpdateProgress(d, t) => {
+                    if let Some(UpdateState::Downloading { done, total, .. }) = &mut self.update {
+                        *done = d;
+                        *total = t;
+                    }
+                }
+                Msg::UpdateDownloaded(res) => {
+                    let update = match self.update.take() {
+                        Some(UpdateState::Downloading { update, .. }) => Some(update),
+                        _ => None,
+                    };
+                    match res {
+                        Ok(path) => match updater::install(&path) {
+                            Ok(()) => {
+                                self.log(format!("Starting installer {}", path.display()));
+                                self.out.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            Err(e) => {
+                                self.log(format!("Update failed: {e:#}"));
+                                self.update = Some(UpdateState::Failed(update, format!("{e:#}")));
+                            }
+                        },
+                        Err(e) => {
+                            self.log(format!("Update download failed: {e}"));
+                            self.update = Some(UpdateState::Failed(update, e));
+                        }
                     }
                 }
                 Msg::JobDone(res) => {
@@ -522,6 +599,196 @@ impl App {
                 .map_err(|e| format!("{e:#} - tip: put the device into DFU mode and try again"))?;
             Ok("Flashing completed successfully - the device will now reboot.".to_string())
         });
+    }
+
+    fn check_for_updates(&mut self, manual: bool) {
+        if matches!(
+            self.update,
+            Some(UpdateState::Checking | UpdateState::Downloading { .. })
+        ) {
+            return;
+        }
+        self.update = Some(UpdateState::Checking);
+        self.spawn(move |out| {
+            let res = updater::check().map_err(|e| format!("{e:#}"));
+            out.send(Msg::UpdateChecked(res, manual));
+        });
+    }
+
+    fn start_update(&mut self, update: Update) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.log(format!("Downloading Obsidia {} ...", update.version));
+        self.update = Some(UpdateState::Downloading {
+            update: update.clone(),
+            done: 0,
+            total: update.asset.as_ref().map(|a| a.size).unwrap_or(0),
+            cancel: cancel.clone(),
+        });
+        self.spawn(move |out| {
+            let mut last = Instant::now() - Duration::from_secs(1);
+            let res = updater::download(&update, &cancel, |done, total| {
+                if last.elapsed() > Duration::from_millis(100) {
+                    last = Instant::now();
+                    out.send(Msg::UpdateProgress(done, total));
+                }
+            });
+            out.send(Msg::UpdateDownloaded(res.map_err(|e| format!("{e:#}"))));
+        });
+    }
+
+    /// Fluent-style info bar shown below the header when an update is available.
+    fn update_bar(&mut self, ui: &mut egui::Ui) {
+        let mut action: Option<&str> = None;
+        let busy = self.busy();
+        let frame = egui::Frame::new()
+            .fill(Color32::from_rgb(0x1f, 0x33, 0x40))
+            .stroke(Stroke::new(1.0, ACCENT.gamma_multiply(0.35)))
+            .corner_radius(4)
+            .inner_margin(egui::Margin::symmetric(14, 8));
+        frame.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| match &self.update {
+                Some(UpdateState::Available(update)) => {
+                    ui.label(RichText::new("ⓘ").color(ACCENT).size(16.0));
+                    ui.label(RichText::new("Update available").strong());
+                    ui.label(format!(
+                        "Obsidia {} is available (you have {}).",
+                        update.version,
+                        updater::CURRENT_VERSION
+                    ));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✖").on_hover_text("Dismiss").clicked() {
+                            action = Some("dismiss");
+                        }
+                        let can_install = update.asset.is_some() && !busy;
+                        let resp = ui.add_enabled(
+                            can_install,
+                            theme::accent_button("Install update", ACCENT, can_install),
+                        );
+                        let resp = if busy {
+                            resp.on_disabled_hover_text(
+                                "Wait until the current operation has finished",
+                            )
+                        } else {
+                            resp.on_disabled_hover_text(
+                                "No installer for this platform in the release",
+                            )
+                        };
+                        if resp.clicked() {
+                            action = Some("install");
+                        }
+                        if ui.button("Release notes").clicked() {
+                            action = Some("notes");
+                        }
+                    });
+                }
+                Some(UpdateState::Downloading {
+                    update,
+                    done,
+                    total,
+                    ..
+                }) => {
+                    ui.spinner();
+                    ui.label(format!("Downloading Obsidia {} ...", update.version));
+                    let frac = if *total > 0 {
+                        *done as f32 / *total as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .desired_width(240.0)
+                            .fill(ACCENT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            action = Some("cancel");
+                        }
+                    });
+                }
+                Some(UpdateState::Failed(_, e)) => {
+                    ui.label(RichText::new("⚠").color(ORANGE));
+                    ui.label(RichText::new(format!("Update failed: {e}")).color(RED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✖").clicked() {
+                            action = Some("dismiss");
+                        }
+                        if ui.button("Open release page").clicked() {
+                            action = Some("page");
+                        }
+                    });
+                }
+                _ => {}
+            });
+        });
+
+        match action {
+            Some("install") => {
+                if let Some(UpdateState::Available(update)) = &self.update {
+                    let update = update.clone();
+                    self.start_update(update);
+                }
+            }
+            Some("cancel") => {
+                if let Some(UpdateState::Downloading { cancel, .. }) = &self.update {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            Some("notes") => self.show_release_notes = true,
+            Some("page") => {
+                let url = match &self.update {
+                    Some(UpdateState::Failed(Some(u), _)) => u.page.clone(),
+                    _ => "https://github.com/LinzN/obsidia/releases".to_string(),
+                };
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+            Some("dismiss") => self.update_dismissed = true,
+            _ => {}
+        }
+    }
+
+    fn show_update_bar(&self) -> bool {
+        !self.update_dismissed
+            && matches!(
+                self.update,
+                Some(UpdateState::Available(_) | UpdateState::Downloading { .. })
+                    | Some(UpdateState::Failed(Some(_), _))
+            )
+    }
+
+    fn release_notes_window(&mut self, ctx: &egui::Context) {
+        let Some(UpdateState::Available(update)) = &self.update else {
+            self.show_release_notes = false;
+            return;
+        };
+        let mut open = self.show_release_notes;
+        let (title, notes, page) = (
+            format!("What's new in Obsidia {}", update.version),
+            update.notes.clone(),
+            update.page.clone(),
+        );
+        egui::Window::new(title)
+            .open(&mut open)
+            .default_size([560.0, 380.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .collapsible(false)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        if notes.trim().is_empty() {
+                            ui.label(RichText::new("No release notes.").weak());
+                        } else {
+                            ui.label(&notes);
+                        }
+                    });
+                ui.add_space(8.0);
+                if ui.button("Open release page").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(page.clone()));
+                }
+            });
+        self.show_release_notes = open;
     }
 
     fn start_backup(&mut self, dev: Device) {
@@ -703,6 +970,15 @@ impl App {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(UpdateState::Available(u)) = &self.update {
+                    let text = RichText::new(format!("Update {} available", u.version))
+                        .small()
+                        .color(ACCENT);
+                    if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                        self.update_dismissed = false;
+                    }
+                    ui.separator();
+                }
                 ui.label(
                     RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                         .small()
@@ -1589,6 +1865,11 @@ impl App {
             if tool_tile(ui, "☰", "Log", "Show the activity log", true) {
                 self.show_log = true;
             }
+            let checking = matches!(self.update, Some(UpdateState::Checking));
+            if tool_tile(ui, "⟳", "Updates", "Check for a new version", !checking) {
+                self.update_dismissed = false;
+                self.check_for_updates(true);
+            }
         });
 
         if !self.missing_tools.is_empty() {
@@ -1748,6 +2029,13 @@ impl eframe::App for App {
             .frame(outer(16, 16, 10, 6))
             .show(ui, |ui| self.header(ui));
 
+        if self.show_update_bar() {
+            egui::Panel::top("update_bar")
+                .show_separator_line(false)
+                .frame(outer(12, 12, 0, 6))
+                .show(ui, |ui| self.update_bar(ui));
+        }
+
         egui::Panel::bottom("status")
             .show_separator_line(false)
             .frame(outer(18, 18, 2, 8))
@@ -1804,6 +2092,7 @@ impl eframe::App for App {
         }
 
         self.log_window(&ctx);
+        self.release_notes_window(&ctx);
         self.flash_dialog(&ctx);
     }
 }

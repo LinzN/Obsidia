@@ -65,6 +65,16 @@ brew install libimobiledevice libirecovery idevicerestore
 Open `obsidia-<version>-macos-arm64.dmg` and drag Obsidia into *Applications*. The app is
 not notarized yet: on first launch right-click it and choose *Open*.
 
+## Updates
+
+Obsidia checks GitHub for a new release on start-up. If one is available, an info bar
+offers to download and install it (the installer is verified against the release's
+`SHA256SUMS`). You can also check manually under *Toolbox > Updates* or with
+`obsidia update`.
+
+Set `OBSIDIA_NO_UPDATE_CHECK=1` to disable the check, e.g. when updates are rolled out
+centrally. `OBSIDIA_UPDATE_URL` points the updater to a different release endpoint.
+
 ## Tool lookup
 
 Obsidia looks for the libimobiledevice tools in this order:
@@ -89,6 +99,7 @@ obsidia flash                         # erase-restore to the latest signed firmw
 obsidia flash -v 18.1 --update        # update to a specific version, keep data
 obsidia flash -f ~/Downloads/x.ipsw   # local IPSW
 obsidia recovery | exit-recovery
+obsidia update                           # check for and install a new version
 ```
 
 With several devices connected, select one with `-u <UDID|ECID>`.

@@ -4,7 +4,7 @@
 |---|---|
 | **Document type** | Vendor self-assessment for software onboarding |
 | **Product** | Obsidia – iPhone / iPad firmware tool |
-| **Version covered** | 0.3.x |
+| **Version covered** | 0.4.x |
 | **Platforms** | Windows 10/11 (x64), Debian/Ubuntu (amd64), macOS 11+ (Apple Silicon) |
 | **Date** | 2026-11-20 |
 | **Status** | Self-assessment, not independently audited |
@@ -26,8 +26,8 @@ also creates local backups and switches devices into and out of recovery mode.
 | Area | Assessment |
 |---|---|
 | Data processed | Device identifiers, firmware files, optional device backups (may contain personal data) |
-| Data sent to third parties | Device model to ipsw.me; device identifiers to Apple during a restore (required by Apple) |
-| Telemetry / analytics | None |
+| Data sent to third parties | Device model to ipsw.me; device identifiers to Apple during a restore (required by Apple); update check to GitHub (no device data) |
+| Telemetry / analytics | None (update check only, can be disabled) |
 | User accounts / credentials | None |
 | Network listeners | None |
 | Required privileges | Administrator for installation; standard user for operation (see section 6) |
@@ -115,23 +115,43 @@ configuration files.
 | `api.ipsw.me` | Firmware list and signing status | HTTPS | Device model identifier | Obsidia |
 | `updates.cdn-apple.com` and other Apple CDN hosts | Firmware download | HTTPS | None beyond the request | Obsidia |
 | `gs.apple.com` | Restore authorization (Apple signing server) | HTTPS | Device identifiers such as ECID, firmware build | `idevicerestore` |
+| `api.github.com` | Update check (latest release) on start-up and on demand | HTTPS | None beyond the request (IP address, user agent with version) | Obsidia |
+| `github.com`, `objects.githubusercontent.com` / `release-assets.githubusercontent.com` | Download of an update installer and `SHA256SUMS`, only after the user clicks *Install update* | HTTPS | None beyond the request | Obsidia |
 
 - No inbound connections, no listening ports.
-- No telemetry, crash reporting, update checks or analytics.
+- No telemetry, crash reporting or analytics. The only background request is the update
+  check against GitHub (see section 5.1).
 - Firmware downloads are verified against the SHA-1 checksum published by ipsw.me.
   Independently of that, the device only accepts firmware that is signed by Apple and
   personalized for that device by Apple's signing server.
 
 **Proxies and TLS inspection:**
 - Obsidia honours the standard `HTTPS_PROXY` / `HTTP_PROXY` environment variables.
-- Obsidia uses a **built-in set of trusted root certificates** (Mozilla CA list) instead of
-  the operating system certificate store. Corporate TLS inspection with a private root
-  CA will therefore cause certificate errors. Such environments must exempt the hosts above
-  from inspection.
+- Obsidia trusts the operating system certificate store in addition to a built-in Mozilla
+  CA list, so corporate TLS inspection works if the inspection root CA is deployed to the
+  workstations. The helper tools (`idevicerestore`) use their own CA bundle on Windows;
+  exempt `gs.apple.com` from inspection if restores fail.
 - The ipsw.me endpoint can be replaced with an internal, compatible mirror via the
   `OBSIDIA_API` environment variable.
 
-Firewall allow list: `api.ipsw.me`, `*.cdn-apple.com`, `gs.apple.com` (TCP 443).
+Firewall allow list: `api.ipsw.me`, `*.cdn-apple.com`, `gs.apple.com` (TCP 443), plus
+`api.github.com`, `github.com` and `*.githubusercontent.com` if the updater is used.
+
+### 5.1 Updater
+
+- On start-up Obsidia asks GitHub for the latest published release of `LinzN/obsidia`.
+  Drafts and pre-releases are ignored. Nothing is downloaded automatically.
+- If a newer version exists, an info bar offers *Install update*. Only then the installer
+  for the platform (MSI / `.deb` / `.dmg`) is downloaded and verified against the release's
+  `SHA256SUMS` file. A mismatch aborts the update.
+- Windows: the MSI is started with `msiexec /passive` and asks for elevation (UAC); Obsidia
+  closes itself. Linux: `pkexec apt-get install`. macOS: the disk image is opened.
+- The checksum file comes from the same release as the installer. It protects against
+  corrupted downloads, but not against a compromised GitHub account (see R11).
+- **Company control:** set `OBSIDIA_NO_UPDATE_CHECK=1` (system environment variable) to
+  disable the automatic check and roll out updates through software distribution instead.
+  `OBSIDIA_UPDATE_URL` can point to an internal, GitHub-compatible release endpoint.
+  Standard users cannot install the per-machine MSI without administrator rights.
 
 ---
 
@@ -143,7 +163,7 @@ Firewall allow list: `api.ipsw.me`, `*.cdn-apple.com`, `gs.apple.com` (TCP 443).
 | Linux | `.deb`, requires root | Standard user with USB access via `usbmuxd` | Binary in `/usr/bin`, desktop entry, icons; depends on `libimobiledevice-utils`, `irecovery`, `idevicerestore`, `usbmuxd` |
 | macOS | Drag & drop `.app` | Standard user | App in `/Applications`; tools installed via Homebrew |
 
-Obsidia does not install services, drivers, scheduled tasks or autostart entries. On
+Obsidia does not install services, drivers, scheduled tasks or autostart entries. Updates run only when a user starts them (section 5.1). On
 Windows the Apple USB drivers come from Apple (Apple Devices app or iTunes) and must be
 approved separately.
 
@@ -188,6 +208,7 @@ Licenses of bundled components: MIT / Apache-2.0 (Rust crates), LGPL-2.1 / LGPL-
 | R8 | Outdated bundled native tools | Medium | Medium | Tools are refreshed on every release build; document versions in release notes | Partially mitigated |
 | R9 | Availability of ipsw.me (third-party service) | Low | Low | Internal mirror via `OBSIDIA_API`; local IPSW import | Mitigated |
 | R10 | Device identifiers shared with Apple and ipsw.me | High | Low | Required for the restore process; document in the record of processing activities | Accepted |
+| R11 | Malicious update through a compromised GitHub account or release pipeline | Low | High | Update needs user action and admin rights; SHA-256 check; companies disable the updater (`OBSIDIA_NO_UPDATE_CHECK=1`) and distribute reviewed versions. Planned: signed installers | Partially mitigated |
 
 Rating scale: Low / Medium / High.
 
@@ -239,6 +260,7 @@ Use this checklist in the software approval process.
 
 **Operation**
 - [ ] Owner for updates assigned; new releases reviewed before rollout
+- [ ] Decision on the built-in updater: allowed, or disabled via `OBSIDIA_NO_UPDATE_CHECK=1` and updates distributed centrally
 - [ ] Process for reporting security issues (GitHub issues / maintainer contact)
 
 ---
@@ -248,10 +270,10 @@ Use this checklist in the software approval process.
 1. Authenticode-sign the MSI, `obsidia.exe` and all bundled tools; notarize the macOS app.
 2. Publish an SBOM (CycloneDX) and checksums (`SHA256SUMS`) with every release.
 3. Add `cargo audit` and `cargo deny` to CI and fail builds on known vulnerabilities.
-4. Option to use the operating system certificate store (for TLS inspection environments).
-5. Verify firmware with SHA-256 where available.
-6. Optional admin settings (e.g. disable "Erase", fixed backup location) via registry / config file.
-7. Optional audit log written to disk (who restored which device, when).
+4. Verify firmware with SHA-256 where available.
+5. Optional admin settings (e.g. disable "Erase", fixed backup location) via registry / config file.
+6. Optional audit log written to disk (who restored which device, when).
+7. Sign update metadata (e.g. minisign) so updates can be verified independently of GitHub.
 
 ---
 

@@ -68,7 +68,7 @@ pub struct CatalogEntry {
     pub identifier: String,
 }
 
-fn http() -> Result<reqwest::blocking::Client> {
+pub(crate) fn http() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(30))
