@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub const REQUIRED_TOOLS: &[&str] = &["idevice_id", "ideviceinfo", "irecovery", "idevicerestore"];
 
@@ -144,16 +145,63 @@ pub fn spawn_error(name: &str, e: std::io::Error) -> anyhow::Error {
 
 /// Run a tool and return stdout; `Ok(None)` if it exited non-zero.
 pub fn run(name: &str, args: &[&str]) -> Result<Option<String>> {
-    let out = tool_cmd(name)?
+    // Device queries must never hang: a stuck helper keeps the USB device
+    // open and breaks every following operation, including restores.
+    let timeout = match name {
+        "irecovery" | "idevice_id" => Duration::from_secs(8),
+        "ideviceinfo" => Duration::from_secs(15),
+        _ => Duration::from_secs(60),
+    };
+    run_with_timeout(name, args, timeout)
+}
+
+/// Run a tool, give up (and kill it) after `timeout`. `Ok(None)` if it failed
+/// or timed out.
+pub fn run_with_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<Option<String>> {
+    use std::io::Read;
+
+    let mut child = tool_cmd(name)?
         .args(args)
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .map_err(|e| spawn_error(name, e))?;
-    Ok(out
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned()))
+
+    // read stdout on a thread so a full pipe can't block the child
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let output = reader.join().unwrap_or_default();
+    Ok(match status {
+        Some(s) if s.success() => Some(String::from_utf8_lossy(&output).into_owned()),
+        _ => None,
+    })
+}
+
+/// Serializes access to the device: queries and restores never run at the
+/// same time, otherwise they compete for the USB connection.
+static DEVICE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Exclusive access to the device for a longer operation (e.g. a restore).
+pub fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    DEVICE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -294,6 +342,7 @@ pub fn recovery_device() -> Result<Option<Device>> {
 }
 
 pub fn all_devices() -> Result<Vec<Device>> {
+    let _lock = exclusive();
     let mut devs = normal_devices()?;
     devs.extend(recovery_device()?);
     Ok(devs)
@@ -310,12 +359,14 @@ pub fn no_device_hint() -> &'static str {
 }
 
 pub fn enter_recovery(dev: &Device) -> Result<()> {
+    let _lock = exclusive();
     run("ideviceenterrecovery", &[&dev.udid])?
         .ok_or_else(|| anyhow!("ideviceenterrecovery failed"))?;
     Ok(())
 }
 
 pub fn exit_recovery() -> Result<()> {
+    let _lock = exclusive();
     run("irecovery", &["-n"])?.ok_or_else(|| anyhow!("irecovery -n failed"))?;
     Ok(())
 }

@@ -70,36 +70,80 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_visuals(v);
 }
 
-/// Fonts: Segoe UI on Windows (matches the system look) and the Phosphor
-/// icon font as a fallback for icons.
+/// Inter (clear, screen-optimized UI font) for text, Phosphor as a fallback
+/// for icons, and slightly larger default sizes so small text stays crisp.
 fn load_system_font(ctx: &egui::Context) {
+    use egui::{FontData, FontFamily, FontId, TextStyle};
+    use std::sync::Arc;
+
     let mut fonts = egui::FontDefinitions::default();
-
-    if cfg!(windows) {
-        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-        if let Ok(bytes) = std::fs::read(format!("{windir}\\Fonts\\segoeui.ttf")) {
-            fonts.font_data.insert(
-                "segoe-ui".into(),
-                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-            );
-            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                family.insert(0, "segoe-ui".into());
-            }
-        }
-    }
-
-    let mut icons = egui::FontData::from_static(crate::icons::FONT);
+    fonts.font_data.insert(
+        "inter".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/fonts/Inter-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "inter-semibold".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/fonts/Inter-SemiBold.ttf"
+        ))),
+    );
+    let mut icons = FontData::from_static(crate::icons::FONT);
     // Phosphor glyphs sit a bit high next to text
     icons.tweak.y_offset_factor = 0.08;
-    fonts
-        .font_data
-        .insert("phosphor".into(), std::sync::Arc::new(icons));
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        if let Some(f) = fonts.families.get_mut(&family) {
-            f.push("phosphor".into());
-        }
+    fonts.font_data.insert("phosphor".into(), Arc::new(icons));
+
+    // Phosphor first: it only contains icons (private use area), and Inter has
+    // its own glyphs at some of those code points.
+    if let Some(f) = fonts.families.get_mut(&FontFamily::Proportional) {
+        f.insert(0, "inter".into());
+        f.insert(0, "phosphor".into());
     }
+    if let Some(f) = fonts.families.get_mut(&FontFamily::Monospace) {
+        f.insert(0, "phosphor".into());
+    }
+    fonts.families.insert(
+        FontFamily::Name(SEMIBOLD.into()),
+        vec!["phosphor".into(), "inter-semibold".into()],
+    );
     ctx.set_fonts(fonts);
+
+    ctx.all_styles_mut(|style| {
+        style.text_styles = [
+            (TextStyle::Small, FontId::proportional(11.5)),
+            (TextStyle::Body, FontId::proportional(14.0)),
+            (TextStyle::Button, FontId::proportional(14.0)),
+            (
+                TextStyle::Heading,
+                FontId::new(20.0, FontFamily::Name(SEMIBOLD.into())),
+            ),
+            (TextStyle::Monospace, FontId::monospace(12.5)),
+        ]
+        .into();
+
+        // consistent spacing for the larger text sizes
+        let sp = &mut style.spacing;
+        sp.item_spacing = egui::vec2(8.0, 6.0);
+        sp.button_padding = egui::vec2(10.0, 5.0);
+        sp.interact_size = egui::vec2(40.0, 28.0);
+        sp.icon_width = 16.0;
+        sp.icon_width_inner = 8.0;
+        sp.icon_spacing = 6.0;
+        sp.window_margin = egui::Margin::same(16);
+        sp.menu_margin = egui::Margin::same(8);
+        sp.combo_height = 320.0;
+    });
+}
+
+/// Font family name for headings and titles.
+pub const SEMIBOLD: &str = "semibold";
+
+/// Semibold text, used for titles.
+pub fn title(text: impl Into<String>, size: f32) -> egui::RichText {
+    egui::RichText::new(text)
+        .family(egui::FontFamily::Name(SEMIBOLD.into()))
+        .size(size)
 }
 
 /// Mica-like window background: almost flat with a faint tint.

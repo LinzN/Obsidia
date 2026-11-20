@@ -732,12 +732,15 @@ impl App {
                     .map_err(|e| format!("{e:#}"))?;
                 let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
                 let (line_out, collected) = (out.clone(), lines.clone());
+                // no device queries while idevicerestore talks to the device
+                let lock = device::exclusive();
                 let result = device::run_streaming(cmd, move |l| {
                     if let Ok(mut v) = collected.lock() {
                         v.push(l.clone());
                     }
                     line_out.send(Msg::Log(l));
                 });
+                drop(lock);
                 let lines = lines.lock().map(|v| v.clone()).unwrap_or_default();
                 if let Some(path) = write_restore_log(&lines) {
                     out.send(Msg::Log(format!("Restore log saved to {}", path.display())));
@@ -845,7 +848,7 @@ impl App {
                     ));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .small_button("\u{e4f6}")
+                            .button("\u{e4f6}")
                             .on_hover_text("Dismiss")
                             .clicked()
                         {
@@ -905,7 +908,7 @@ impl App {
                     ui.label(RichText::new("\u{e4e0}").color(ORANGE));
                     ui.label(RichText::new(format!("Update failed: {e}")).color(RED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("\u{e4f6}").clicked() {
+                        if ui.button("\u{e4f6}").clicked() {
                             action = Some("dismiss");
                         }
                         if ui.button("Open release page").clicked() {
@@ -990,6 +993,7 @@ impl App {
         self.start_job(JobKind::Other, "Backup", move |out| {
             let dir = device::default_backup_dir();
             let cmd = device::backup_cmd(&dev, &dir).map_err(|e| format!("{e:#}"))?;
+            let _lock = device::exclusive();
             let o = out.clone();
             device::run_streaming(cmd, move |l| o.send(Msg::Log(l)))
                 .map_err(|e| format!("{e:#}"))?;
@@ -1087,7 +1091,7 @@ impl App {
             }
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new("Obsidia").size(20.0).strong());
+                ui.label(theme::title("Obsidia", 20.0));
                 link(ui, "by MirraNET", MIRRANET_URL);
             });
             ui.add_space(28.0);
@@ -1104,21 +1108,13 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(icons::INFO)
-                    .on_hover_text("About Obsidia")
-                    .clicked()
-                {
+                if header_button(ui, icons::INFO, "About Obsidia").clicked() {
                     self.show_about = !self.show_about;
                 }
-                if ui.button(icons::GEAR).on_hover_text("Settings").clicked() {
+                if header_button(ui, icons::GEAR, "Settings").clicked() {
                     self.show_settings = !self.show_settings;
                 }
-                if ui
-                    .button("\u{e2f2} Log")
-                    .on_hover_text("Show the log")
-                    .clicked()
-                {
+                if header_button(ui, "\u{e2f2}", "Log").clicked() {
                     self.show_log = !self.show_log;
                 }
                 let active = self.downloads.len();
@@ -1127,11 +1123,16 @@ impl App {
                 } else {
                     "\u{e20c}".to_string()
                 };
-                let resp = ui.button(dl).on_hover_text(if active > 0 {
-                    format!("{active} download(s) running - open firmware folder")
-                } else {
-                    "Open the firmware folder".to_string()
-                });
+                let resp = ui
+                    .add(
+                        egui::Button::new(RichText::new(dl).size(16.0))
+                            .min_size(egui::vec2(34.0, 32.0)),
+                    )
+                    .on_hover_text(if active > 0 {
+                        format!("{active} download(s) running - open firmware folder")
+                    } else {
+                        "Open the firmware folder".to_string()
+                    });
                 if resp.clicked() {
                     if let Ok(dir) = firmware::firmware_dir() {
                         open_path(&dir);
@@ -1183,7 +1184,7 @@ impl App {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("View log").clicked() {
+                if ui.button("View log").clicked() {
                     self.show_log = !self.show_log;
                 }
             });
@@ -1353,7 +1354,7 @@ impl App {
                     ui.label(RichText::new("Local firmware:").weak());
                     ui.label(RichText::new(file_name(&path)).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("\u{e4f6} Remove").clicked() {
+                        if ui.button("\u{e4f6} Remove").clicked() {
                             self.selection = None;
                         }
                     });
@@ -1661,7 +1662,7 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("\u{e182}").color(GREEN).size(28.0));
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("DFU mode detected").size(18.0).strong());
+                                ui.label(theme::title("DFU mode detected", 18.0));
                                 ui.label("You can release the button. The device is ready to be flashed.");
                             });
                         });
@@ -1682,7 +1683,7 @@ impl App {
                         ui.horizontal_top(|ui| {
                             ui.label(RichText::new("\u{e4f6}").color(RED).size(24.0));
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("DFU mode not detected").size(17.0).strong());
+                                ui.label(theme::title("DFU mode not detected", 17.0));
                                 ui.add(egui::Label::new(reason.as_str()).wrap());
                             });
                         });
@@ -1791,7 +1792,7 @@ impl App {
             ui.columns(2, |cols| {
                 theme::surface(&mut cols[0], Surface::Card, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("Recovery mode").size(16.0).strong());
+                    ui.label(theme::title("Recovery mode", 16.0));
                     ui.label(
                         RichText::new("Use this first. The screen shows a cable pointing to a computer.")
                             .weak()
@@ -1802,7 +1803,7 @@ impl App {
                 });
                 theme::surface(&mut cols[1], Surface::Card, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("DFU mode").size(16.0).strong());
+                    ui.label(theme::title("DFU mode", 16.0));
                     ui.label(
                         RichText::new("Deepest restore mode - use it when recovery mode does not help. The screen stays black.")
                             .weak()
@@ -1851,7 +1852,7 @@ impl App {
                     if let Some(logo) = &self.logo {
                         ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(96.0, 96.0)));
                     }
-                    ui.label(RichText::new("Obsidia").size(24.0).strong());
+                    ui.label(theme::title("Obsidia", 24.0));
                     ui.label(
                         RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).weak(),
                     );
@@ -1914,6 +1915,7 @@ impl App {
                             );
                             link(ui, "ipsw.me firmware data", "https://ipsw.me");
                             link(ui, "Phosphor Icons (MIT)", "https://phosphoricons.com");
+                        link(ui, "Inter font (OFL)", "https://rsms.me/inter/");
                         });
                         ui.end_row();
                     });
@@ -2035,7 +2037,7 @@ impl App {
                     ] {
                         ui.label(RichText::new(label).weak());
                         ui.label(RichText::new(dir.display().to_string()).small());
-                        if ui.small_button("Open").clicked() {
+                        if ui.button("Open").clicked() {
                             let _ = std::fs::create_dir_all(&dir);
                             open_path(&dir);
                         }
@@ -2318,7 +2320,7 @@ impl App {
                                                 .show_percentage(),
                                         );
                                         if ui
-                                            .small_button("\u{e4f6}")
+                                            .button("\u{e4f6}")
                                             .on_hover_text("Cancel (can be resumed)")
                                             .clicked()
                                         {
@@ -2438,7 +2440,7 @@ impl App {
                             .fill(GREEN),
                     );
                     ui.add_space(14.0);
-                    ui.label(RichText::new("Congratulations!").size(18.0).strong());
+                    ui.label(theme::title("Congratulations!", 18.0));
                     ui.label(RichText::new(msg).weak());
                     ui.add_space(14.0);
                     if ui
@@ -2459,12 +2461,7 @@ impl App {
                             .fill(DANGER),
                     );
                     ui.add_space(14.0);
-                    ui.label(
-                        RichText::new("Flashing failed")
-                            .size(18.0)
-                            .strong()
-                            .color(RED),
-                    );
+                    ui.label(theme::title("Flashing failed", 18.0).color(RED));
                     ui.label(RichText::new(e).weak());
                     ui.add_space(14.0);
                     if ui
@@ -2535,7 +2532,7 @@ impl App {
                     }
                 });
         } else {
-            ui.label(RichText::new(&model).size(17.0).strong());
+            ui.label(theme::title(&model, 17.0));
         }
         if dev.name != model && dev.name != "-" {
             ui.label(RichText::new(&dev.name).weak());
@@ -2672,7 +2669,7 @@ impl App {
             });
             ui.add_space(20.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(&model).size(26.0).strong());
+                ui.label(theme::title(&model, 26.0));
                 if dev.name != model && dev.name != "-" {
                     ui.label(RichText::new(&dev.name).weak().size(15.0));
                 }
@@ -2894,10 +2891,10 @@ impl App {
             .collapsible(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.small_button("Copy").clicked() {
+                    if ui.button("Copy").clicked() {
                         ui.ctx().copy_text(self.log.join("\n"));
                     }
-                    if ui.small_button("Clear").clicked() {
+                    if ui.button("Clear").clicked() {
                         self.log.clear();
                     }
                 });
@@ -3109,7 +3106,7 @@ impl eframe::App for App {
 /// Selector-bar style tab: plain text, accent pill under the active tab.
 fn tab_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     let text = if active {
-        RichText::new(label).size(15.0).strong()
+        theme::title(label, 15.0)
     } else {
         RichText::new(label)
             .size(15.0)
@@ -3175,14 +3172,16 @@ fn link(ui: &mut egui::Ui, text: &str, url: &str) {
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).small().weak().strong());
+    ui.add_space(4.0);
+    ui.label(RichText::new(text).size(11.0).weak());
     ui.add_space(2.0);
 }
 
 fn page_title(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-    ui.label(RichText::new(title).size(20.0).strong());
-    ui.label(RichText::new(subtitle).weak().small());
-    ui.add_space(10.0);
+    ui.label(theme::title(title, 20.0));
+    ui.add_space(2.0);
+    ui.label(RichText::new(subtitle).weak());
+    ui.add_space(14.0);
 }
 
 fn empty_state(ui: &mut egui::Ui, icon: &str, title: &str, text: &str, error: Option<&str>) {
@@ -3190,7 +3189,7 @@ fn empty_state(ui: &mut egui::Ui, icon: &str, title: &str, text: &str, error: Op
         ui.add_space(ui.available_height() * 0.2);
         ui.label(RichText::new(icon).size(46.0).weak());
         ui.add_space(6.0);
-        ui.label(RichText::new(title).size(17.0).strong());
+        ui.label(theme::title(title, 17.0));
         ui.label(RichText::new(text).weak());
         if let Some(e) = error {
             ui.add_space(8.0);
@@ -3437,7 +3436,7 @@ fn big_step(ui: &mut egui::Ui, text: &str, hint: Option<&str>, seconds_left: f32
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.set_width(430.0);
-            ui.add(egui::Label::new(RichText::new(text).size(20.0).strong()).wrap());
+            ui.add(egui::Label::new(theme::title(text, 20.0)).wrap());
             if let Some(h) = hint {
                 ui.label(RichText::new(h).weak());
             }
@@ -3574,4 +3573,10 @@ fn project_card_content(ui: &mut egui::Ui) {
             ui.ctx().open_url(egui::OpenUrl::new_tab(MIRRANET_URL));
         }
     }
+}
+
+/// Square icon button for the header toolbar.
+fn header_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
+    ui.add(egui::Button::new(RichText::new(icon).size(16.0)).min_size(egui::vec2(34.0, 32.0)))
+        .on_hover_text(tooltip)
 }

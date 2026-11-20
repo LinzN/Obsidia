@@ -1,4 +1,5 @@
-//! Phosphor icon font (MIT, https://phosphoricons.com), used as a fallback
+//! Phosphor icon font (MIT, https://phosphoricons.com), reduced to the icon
+//! code points so it can sit in front of the text font. Used as a fallback
 //! font so icons can be written straight into labels.
 
 pub const FONT: &[u8] = include_bytes!("../assets/fonts/Phosphor.ttf");

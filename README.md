@@ -169,4 +169,4 @@ Obsidia is developed by [MirraNET](https://mirranet.de). Source code, issues and
 ## License
 
 MIT. The bundled libimobiledevice tools are licensed under the LGPL-2.1 / LGPL-3.0
-by their respective authors. Icons: [Phosphor Icons](https://phosphoricons.com) (MIT).
+by their respective authors. Icons: [Phosphor Icons](https://phosphoricons.com) (MIT). Font: [Inter](https://rsms.me/inter/) (SIL Open Font License, see `assets/fonts/Inter-LICENSE.txt`).
