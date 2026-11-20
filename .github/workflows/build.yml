@@ -29,16 +29,46 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
-      - name: Install libimobiledevice (MSYS2)
+      - name: Set up MSYS2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: true
           install: >-
-            mingw-w64-ucrt-x86_64-libimobiledevice
-            mingw-w64-ucrt-x86_64-libirecovery
-            mingw-w64-ucrt-x86_64-idevicerestore
+            git
+            make
+            autoconf
+            automake
+            libtool
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-libzip
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-readline
             mingw-w64-ucrt-x86_64-ca-certificates
+
+      # The packaged idevicerestore is too old for current devices and iOS
+      # versions (Apple rejects its TSS requests), so build the whole stack
+      # from the current sources.
+      - name: Build libimobiledevice stack from source
+        shell: msys2 {0}
+        run: |
+          set -e
+          mkdir -p /tmp/limd && cd /tmp/limd
+          for repo in libplist libimobiledevice-glue libusbmuxd libtatsu libimobiledevice libirecovery idevicerestore; do
+            echo "::group::$repo"
+            git clone --quiet "https://github.com/libimobiledevice/$repo.git"
+            cd "$repo"
+            echo "$repo $(git describe --tags --always)" | tee -a /tmp/limd/versions.txt
+            ./autogen.sh --prefix=/ucrt64 --without-cython --disable-static
+            make -j"$(nproc)"
+            make install
+            cd ..
+            echo "::endgroup::"
+          done
+          cat /tmp/limd/versions.txt
 
       - name: Collect files
         shell: msys2 {0}
@@ -59,6 +89,7 @@ jobs:
           # libcurl from MSYS2 resolves its CA bundle relative to the DLL: <tools>/../etc/ssl/certs
           mkdir -p dist/etc/ssl/certs
           cp /ucrt64/etc/ssl/certs/ca-bundle.crt dist/etc/ssl/certs/ca-bundle.crt
+          cp /tmp/limd/versions.txt dist/tools/VERSIONS.txt
 
       - name: Build MSI
         shell: pwsh

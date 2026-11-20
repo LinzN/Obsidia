@@ -1386,7 +1386,7 @@ impl App {
                     "Device detection is not available because required tools are missing."
                 };
                 dfu.state = DfuState::Failed(reason.to_string());
-                self.log("DFU assistant: DFU mode not detected");
+                self.log(format!("DFU assistant: DFU mode not detected - {reason}"));
             }
             _ => {}
         }
@@ -2203,7 +2203,9 @@ impl App {
             });
             return;
         };
-        self.ensure_firmwares(&dev.product);
+        if dev.product != "?" {
+            self.ensure_firmwares(&dev.product);
+        }
         let model = self
             .model_name(&dev.product)
             .unwrap_or(dev.kind())
@@ -2335,7 +2337,9 @@ impl App {
             );
             return;
         };
-        self.ensure_firmwares(&dev.product);
+        if dev.product != "?" {
+            self.ensure_firmwares(&dev.product);
+        }
         let model = self
             .model_name(&dev.product)
             .unwrap_or(dev.kind())
@@ -3010,8 +3014,29 @@ fn open_path(path: &Path) {
     let _ = std::process::Command::new(program).arg(path).spawn();
 }
 
-/// Last "ERROR: ..." line printed by idevicerestore, without the prefix noise.
+/// Most useful error printed by idevicerestore. stdout and stderr arrive out
+/// of order, so an answer from Apple's signing server wins over the generic
+/// last error line.
 fn last_error_line(lines: &[String]) -> Option<String> {
+    if let Some(tss) = lines.iter().find(|l| l.contains("TSS server returned")) {
+        let message = tss
+            .split("MESSAGE=")
+            .nth(1)
+            .map(|m| m.trim().to_string())
+            .unwrap_or_else(|| tss.trim().to_string());
+        let status = tss
+            .split("STATUS=")
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .unwrap_or("?");
+        let hint = match status {
+            "94" => " Apple refused to sign this firmware for this device. Make sure the version is still signed; if it is, the bundled restore tool may be outdated.",
+            _ => "",
+        };
+        return Some(format!(
+            "Apple signing server (status {status}): {message}.{hint}"
+        ));
+    }
     lines
         .iter()
         .rev()
