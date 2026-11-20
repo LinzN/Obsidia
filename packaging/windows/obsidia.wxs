@@ -12,7 +12,10 @@
            Scope="perMachine"
            Compressed="yes">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Obsidia is already installed." />
+    <!-- AllowSameVersionUpgrades: a rebuild with the same version replaces the
+         existing installation instead of being installed side by side -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of Obsidia is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Icon Id="AppIcon" SourceFile="$(Root)\assets\obsidia.ico" />
