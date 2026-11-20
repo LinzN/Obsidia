@@ -124,11 +124,6 @@ pub fn resolve_firmware(product: &str, version: Option<&str>) -> Result<Firmware
 pub fn cache_dir() -> Result<PathBuf> {
     let base = dirs::cache_dir().ok_or_else(|| anyhow!("no cache directory available"))?;
     let dir = base.join("obsidia");
-    // Keep downloads made under the project's former name (MirraFlash).
-    let legacy = base.join("mirraflash");
-    if !dir.exists() && legacy.is_dir() {
-        let _ = fs::rename(&legacy, &dir);
-    }
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }

@@ -4,9 +4,7 @@
 
 <h1 align="center">Obsidia</h1>
 
-<p align="center"><em>(formerly MirraFlash)</em></p>
-
-A 3uTools-style firmware flashing tool for **iPhone and iPad**, written in Rust.
+A firmware flashing tool for **iPhone and iPad**, written in Rust.
 Runs on **Windows**, **Linux** and **macOS** - with a modern glass-styled graphical interface and a full CLI.
 
 ![Obsidia](docs/screenshot.png)
@@ -17,7 +15,7 @@ from [ipsw.me](https://ipsw.me).
 
 ## Features
 
-- 3uTools-like layout: Device, Flash and Toolbox tabs, firmware list in the middle,
+- Clear layout: Device, Flash and Toolbox tabs, firmware list in the middle,
   device and flash options on the right
 - Detect iPhones / iPads in **Normal**, **Recovery** and **DFU** mode, with model, OS version,
   capacity, battery, serial, ECID and UDID
