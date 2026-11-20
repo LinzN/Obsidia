@@ -115,6 +115,11 @@ builds all installers on every push and publishes a release whenever the version
 - **Restore fails:** put the device into **DFU mode** and try again.
 - **Activation Lock** still applies after a restore - you need the Apple ID password.
 
+## Security
+
+A security assessment for companies evaluating Obsidia is available in
+[docs/SECURITY_ASSESSMENT.md](docs/SECURITY_ASSESSMENT.md).
+
 ## License
 
 MIT. The bundled libimobiledevice tools are licensed under the LGPL-2.1 / LGPL-3.0
