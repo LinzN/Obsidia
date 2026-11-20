@@ -1100,17 +1100,6 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let github = egui::Button::new(
-                    RichText::new(format!("{}  Open source on GitHub", icons::GITHUB_LOGO))
-                        .strong(),
-                )
-                .fill(Color32::from_white_alpha(10))
-                .stroke(Stroke::new(1.0, ACCENT.gamma_multiply(0.5)))
-                .corner_radius(14);
-                if ui.add(github).on_hover_text(GITHUB_URL).clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(GITHUB_URL));
-                }
-                ui.add_space(6.0);
                 if ui
                     .button(icons::INFO)
                     .on_hover_text("About Obsidia")
@@ -1199,11 +1188,6 @@ impl App {
                     }
                     ui.separator();
                 }
-                link(ui, "GitHub", GITHUB_URL);
-                ui.label(RichText::new("·").small().weak());
-                link(ui, "mirranet.de", MIRRANET_URL);
-                ui.label(RichText::new("A MirraNET project ·").small().weak());
-                ui.separator();
                 ui.label(
                     RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                         .small()
@@ -3515,7 +3499,7 @@ fn project_card_content(ui: &mut egui::Ui) {
         }
         if ui
             .add(
-                egui::Button::new(format!("{}  mirranet.de", icons::GLOBE))
+                egui::Button::new(format!("{}  MirraNET.de", icons::GLOBE))
                     .min_size(egui::vec2(width, 28.0)),
             )
             .on_hover_text(MIRRANET_URL)
