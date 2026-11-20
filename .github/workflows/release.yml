@@ -1,75 +1,71 @@
 name: Release
 
-# Builds all installers and publishes a GitHub release for the version in
-# Cargo.toml. Start it manually under Actions > Release > Run workflow, or by
-# pushing a v* tag.
-
+# One click in GitHub (Actions > Release > Run workflow): sets the version,
+# commits and tags it, then starts the build that publishes the GitHub
+# release with the installers. Obsidia's updater picks it up from there.
 on:
   workflow_dispatch:
     inputs:
-      prerelease:
-        description: Mark as pre-release
-        type: boolean
-        default: false
-      draft:
-        description: Create as draft
-        type: boolean
-        default: false
-  push:
-    tags: ["v*"]
+      version:
+        description: "Version X.Y.Z (empty: current version if not released yet, else next patch version)"
+        required: false
+        type: string
 
 permissions:
   contents: write
+  actions: write
+
+concurrency: release
 
 jobs:
-  check:
-    name: Check version
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
+  tag:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - id: version
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Choose version
+        id: version
+        run: |
+          current=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          version="${{ inputs.version }}"
+          version="${version#v}"
+          if [ -z "$version" ]; then
+            if git rev-parse -q --verify "refs/tags/v$current" >/dev/null; then
+              IFS=. read -r major minor patch <<<"$current"
+              version="$major.$minor.$((patch + 1))"
+            else
+              version="$current"
+            fi
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Version must be X.Y.Z, got '$version'"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then echo "::error::v$version already exists"; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+      - name: Set version, commit and tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CURRENT: ${{ steps.version.outputs.current }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$VERSION" = "$CURRENT" ]; then
+            git tag -a "v$VERSION" -m "Obsidia $VERSION"
+            git push origin "v$VERSION"
+          else
+            scripts/release.sh "$VERSION"
+            git push origin HEAD:main "v$VERSION"
+          fi
+
+      - name: Build and publish
+        # Tags pushed with the workflow token don't trigger workflows, so the
+        # build is started explicitly for the tag.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
-          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$tag" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $tag"
-            exit 1
-          fi
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "::error::Release $tag already exists - bump the version in Cargo.toml first"
-            exit 1
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: check
-    uses: ./.github/workflows/build.yml
-
-  publish:
-    name: Publish
-    needs: [check, build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Checksums
-        run: |
-          cd dist
-          sha256sum * > SHA256SUMS
-          cat SHA256SUMS
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.check.outputs.tag }}
-          name: Obsidia ${{ needs.check.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          prerelease: ${{ inputs.prerelease || false }}
-          draft: ${{ inputs.draft || false }}
-          files: dist/*
-          generate_release_notes: true
+          gh workflow run build.yml --ref "v${{ steps.version.outputs.version }}"
+          echo "### Obsidia ${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tagged v${{ steps.version.outputs.version }}; the *Build* workflow builds the installers and publishes the release." >> "$GITHUB_STEP_SUMMARY"

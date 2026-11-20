@@ -135,9 +135,10 @@ On Linux the GUI needs the usual X11/Wayland development headers:
 `libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev`.
 
 Packaging lives in `packaging/` (WiX MSI, `cargo deb`, `.app`/`.dmg`). GitHub Actions
-builds all installers on every push (`build.yml`). Releases are published separately by
-the `Release` workflow: bump the version in `Cargo.toml`, then run *Actions > Release >
-Run workflow* (or push a matching `v*` tag).
+builds all installers on every push (`build.yml`). Releases: run *Actions > Release > Run workflow*
+and enter the version (e.g. `0.5.0`; empty = next patch version). The workflow sets the
+version, commits and tags it and starts the build, which publishes the GitHub release.
+Locally the same works with `scripts/release.sh 0.5.0` and `git push origin main v0.5.0`.
 
 ## Troubleshooting
 
