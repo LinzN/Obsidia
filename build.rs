@@ -6,6 +6,8 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/obsidia.ico");
         res.set("ProductName", "Obsidia");
+        res.set("CompanyName", "MirraNET");
+        res.set("LegalCopyright", "MirraNET - https://mirranet.de");
         res.set("FileDescription", "Obsidia - iPhone/iPad firmware tool");
         if let Err(e) = res.compile() {
             println!("cargo:warning=failed to embed Windows icon: {e}");

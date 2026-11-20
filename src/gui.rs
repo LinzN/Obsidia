@@ -2,6 +2,8 @@
 
 use crate::device::{self, Device, Mode};
 use crate::firmware::{self, CatalogEntry, DeviceInfo, Firmware, Progress};
+use crate::guides::Family;
+use crate::settings::Settings;
 use crate::theme::{self, Surface, ACCENT, DANGER, GREEN, ORANGE, RED};
 use crate::updater::{self, Update};
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -16,6 +18,8 @@ use std::time::{Duration, Instant};
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(3);
 const LOG_LIMIT: usize = 5000;
+const MIRRANET_URL: &str = "https://mirranet.de";
+const GITHUB_URL: &str = "https://github.com/LinzN/obsidia";
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
 
 pub fn run() -> anyhow::Result<()> {
@@ -134,6 +138,14 @@ enum UpdateState {
 }
 
 #[derive(PartialEq, Clone, Copy)]
+enum LocalStatus {
+    Signed,
+    Expired,
+    Checking,
+    Unknown,
+}
+
+#[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Device,
     Flash,
@@ -145,6 +157,7 @@ enum FlashPage {
     SmartFlash,
     FirmwareDownload,
     LocalFirmware,
+    Guide,
 }
 
 /// What the Flash button will install.
@@ -175,7 +188,8 @@ struct App {
     firmwares: HashMap<String, Load<DeviceInfo>>,
     show_unsigned: bool,
     downloads: HashMap<String, Download>,
-    local_files: Vec<(PathBuf, u64)>,
+    local_files: Vec<firmware::LocalFirmware>,
+    clean_pending: bool,
 
     selection: Option<Selection>,
     erase: bool,
@@ -190,6 +204,10 @@ struct App {
     update: Option<UpdateState>,
     update_dismissed: bool,
     show_release_notes: bool,
+
+    settings: Settings,
+    show_settings: bool,
+    guide_family: Option<Family>,
 }
 
 impl App {
@@ -218,6 +236,7 @@ impl App {
             show_unsigned: false,
             downloads: HashMap::new(),
             local_files: Vec::new(),
+            clean_pending: false,
             selection: None,
             erase: true,
             job: None,
@@ -229,8 +248,11 @@ impl App {
             update: None,
             update_dismissed: false,
             show_release_notes: false,
+            settings: Settings::load(),
+            show_settings: false,
+            guide_family: None,
         };
-        if updater::auto_check_enabled() {
+        if updater::auto_check_enabled() && app.settings.check_updates {
             app.check_for_updates(false);
         }
         app.refresh_local_files();
@@ -272,26 +294,80 @@ impl App {
     }
 
     fn refresh_local_files(&mut self) {
-        self.local_files = firmware::cache_dir()
-            .ok()
-            .and_then(|d| std::fs::read_dir(d).ok())
-            .map(|rd| {
-                let mut v: Vec<(PathBuf, u64)> = rd
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| {
-                        p.extension()
-                            .is_some_and(|e| e.eq_ignore_ascii_case("ipsw"))
-                    })
-                    .map(|p| {
-                        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                        (p, size)
-                    })
-                    .collect();
-                v.sort();
-                v
-            })
-            .unwrap_or_default();
+        self.local_files = firmware::local_firmware();
+        // Look up the signing status of every downloaded firmware.
+        let products: Vec<String> = self
+            .local_files
+            .iter()
+            .filter_map(|f| f.product.clone())
+            .collect();
+        for p in products {
+            self.ensure_firmwares(&p);
+        }
+        self.clean_pending = true;
+    }
+
+    fn local_status(&self, file: &firmware::LocalFirmware) -> LocalStatus {
+        let (Some(product), Some(build)) = (&file.product, &file.buildid) else {
+            return LocalStatus::Unknown;
+        };
+        match self.firmwares.get(product) {
+            Some(Load::Ready(info)) => match info.firmwares.iter().find(|f| &f.buildid == build) {
+                Some(fw) if fw.signed => LocalStatus::Signed,
+                Some(_) => LocalStatus::Expired,
+                None => LocalStatus::Unknown,
+            },
+            Some(Load::Loading) | None => LocalStatus::Checking,
+            Some(Load::Failed(_)) => LocalStatus::Unknown,
+        }
+    }
+
+    /// Delete downloaded firmware that Apple no longer signs. Files that are
+    /// selected for flashing or in use by a running job are kept.
+    fn remove_expired(&mut self, reason: &str) -> usize {
+        if self.busy() {
+            return 0;
+        }
+        let expired: Vec<PathBuf> = self
+            .local_files
+            .iter()
+            .filter(|f| self.local_status(f) == LocalStatus::Expired)
+            .filter(|f| self.selection != Some(Selection::Local(f.path.clone())))
+            .map(|f| f.path.clone())
+            .collect();
+        let mut removed = 0;
+        for path in expired {
+            match firmware::delete_local(&path) {
+                Ok(()) => {
+                    removed += 1;
+                    self.log(format!(
+                        "{reason}: removed {} (no longer signed)",
+                        path.display()
+                    ));
+                }
+                Err(e) => self.log(format!("Could not delete {}: {e}", path.display())),
+            }
+        }
+        if removed > 0 {
+            self.local_files = firmware::local_firmware();
+        }
+        removed
+    }
+
+    fn auto_clean(&mut self) {
+        if !self.clean_pending || !self.settings.auto_clean || self.busy() {
+            return;
+        }
+        // wait until the signing status of every file is known
+        if self
+            .local_files
+            .iter()
+            .any(|f| self.local_status(f) == LocalStatus::Checking)
+        {
+            return;
+        }
+        self.clean_pending = false;
+        self.remove_expired("Auto-clean");
     }
 
     fn process_messages(&mut self) {
@@ -346,6 +422,7 @@ impl App {
                         }
                     };
                     self.firmwares.insert(product, state);
+                    self.clean_pending = true;
                 }
                 Msg::DlProgress(url, p) => {
                     if let Some(d) = self.downloads.get_mut(&url) {
@@ -594,9 +671,24 @@ impl App {
             out.send(Msg::JobStatus("Preparing device ...".into()));
             let cmd =
                 device::restore_cmd(&dev, &ipsw, erase, false).map_err(|e| format!("{e:#}"))?;
-            let line_out = out.clone();
-            device::run_streaming(cmd, move |l| line_out.send(Msg::Log(l)))
-                .map_err(|e| format!("{e:#} - tip: put the device into DFU mode and try again"))?;
+            let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let (line_out, collected) = (out.clone(), lines.clone());
+            let result = device::run_streaming(cmd, move |l| {
+                if let Ok(mut v) = collected.lock() {
+                    v.push(l.clone());
+                }
+                line_out.send(Msg::Log(l));
+            });
+            let lines = lines.lock().map(|v| v.clone()).unwrap_or_default();
+            if let Some(path) = write_restore_log(&lines) {
+                out.send(Msg::Log(format!("Restore log saved to {}", path.display())));
+            }
+            if let Err(e) = result {
+                return Err(match last_error_line(&lines) {
+                    Some(line) => format!("{line} ({e:#})"),
+                    None => format!("{e:#} - tip: put the device into DFU mode and try again"),
+                });
+            }
             Ok("Flashing completed successfully - the device will now reboot.".to_string())
         });
     }
@@ -738,7 +830,7 @@ impl App {
             Some("page") => {
                 let url = match &self.update {
                     Some(UpdateState::Failed(Some(u), _)) => u.page.clone(),
-                    _ => "https://github.com/LinzN/obsidia/releases".to_string(),
+                    _ => format!("{GITHUB_URL}/releases"),
                 };
                 ui.ctx().open_url(egui::OpenUrl::new_tab(url));
             }
@@ -905,6 +997,9 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("⚙").on_hover_text("Settings").clicked() {
+                    self.show_settings = !self.show_settings;
+                }
                 if ui.button("☰ Log").on_hover_text("Show the log").clicked() {
                     self.show_log = !self.show_log;
                 }
@@ -920,7 +1015,7 @@ impl App {
                     "Open the firmware folder".to_string()
                 });
                 if resp.clicked() {
-                    if let Ok(dir) = firmware::cache_dir() {
+                    if let Ok(dir) = firmware::firmware_dir() {
                         open_path(&dir);
                     }
                 }
@@ -979,6 +1074,11 @@ impl App {
                     }
                     ui.separator();
                 }
+                link(ui, "GitHub", GITHUB_URL);
+                ui.label(RichText::new("·").small().weak());
+                link(ui, "mirranet.de", MIRRANET_URL);
+                ui.label(RichText::new("A MirraNET project ·").small().weak());
+                ui.separator();
                 ui.label(
                     RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                         .small()
@@ -1021,6 +1121,9 @@ impl App {
         }
         ui.add_space(12.0);
         section_label(ui, "TOOLS");
+        if nav_button(ui, "📖  Recovery & DFU", self.page == FlashPage::Guide).clicked() {
+            self.page = FlashPage::Guide;
+        }
         if nav_button(ui, "🧰  Toolbox", false).clicked() {
             self.tab = Tab::Toolbox;
         }
@@ -1042,7 +1145,7 @@ impl App {
                 self.import_local_firmware();
             }
             if ui.button("🗀 Open Folder").clicked() {
-                if let Ok(dir) = firmware::cache_dir() {
+                if let Ok(dir) = firmware::firmware_dir() {
                     open_path(&dir);
                 }
             }
@@ -1186,23 +1289,194 @@ impl App {
         }
     }
 
+    fn guide_page(&mut self, ui: &mut egui::Ui) {
+        page_title(
+            ui,
+            "Recovery & DFU mode",
+            "If a restore fails, put the device into recovery or DFU mode and flash again.",
+        );
+        let detected = self.device().and_then(|d| Family::from_product(&d.product));
+        let family = self
+            .guide_family
+            .or(detected)
+            .unwrap_or(Family::IPhoneModern);
+
+        ui.horizontal(|ui| {
+            ui.label("Device:");
+            egui::ComboBox::from_id_salt("guide_family")
+                .selected_text(family.label())
+                .width(320.0)
+                .show_ui(ui, |ui| {
+                    for f in Family::ALL {
+                        let label = if Some(f) == detected {
+                            format!("{} (connected)", f.label())
+                        } else {
+                            f.label().to_string()
+                        };
+                        if ui.selectable_label(f == family, label).clicked() {
+                            self.guide_family = Some(f);
+                        }
+                    }
+                });
+        });
+        ui.add_space(10.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.columns(2, |cols| {
+                theme::surface(&mut cols[0], Surface::Card, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new("Recovery mode").size(16.0).strong());
+                    ui.label(
+                        RichText::new("Use this first. The screen shows a cable pointing to a computer.")
+                            .weak()
+                            .small(),
+                    );
+                    ui.add_space(8.0);
+                    steps(ui, family.recovery_steps());
+                });
+                theme::surface(&mut cols[1], Surface::Card, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new("DFU mode").size(16.0).strong());
+                    ui.label(
+                        RichText::new("Deepest restore mode - use it when recovery mode does not help. The screen stays black.")
+                            .weak()
+                            .small(),
+                    );
+                    ui.add_space(8.0);
+                    steps(ui, family.dfu_steps());
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("If the Apple logo appears, a button was held too long - start again.")
+                            .color(ORANGE)
+                            .small(),
+                    );
+                });
+            });
+            ui.add_space(10.0);
+            theme::surface(ui, Surface::Card, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("Leave recovery / DFU mode").strong());
+                ui.label(
+                    "Use \"Exit recovery\" in Obsidia, or force restart the device:",
+                );
+                ui.label(RichText::new(family.force_restart()).weak());
+            });
+            if let Some(dev) = self.device() {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Current mode:").weak());
+                    mode_badge(ui, &dev.mode);
+                });
+            }
+        });
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_settings;
+        let mut changed = false;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(480.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.label(RichText::new("Firmware").strong());
+                changed |= ui
+                    .checkbox(&mut self.settings.auto_clean, "Auto-clean expired firmware")
+                    .changed();
+                ui.label(
+                    RichText::new(
+                        "Downloaded firmware is reused while Apple signs it. With auto-clean, files Apple no longer signs are deleted automatically.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.add_space(10.0);
+
+                ui.label(RichText::new("Updates").strong());
+                changed |= ui
+                    .checkbox(&mut self.settings.check_updates, "Check for updates on start-up")
+                    .changed();
+                if !updater::auto_check_enabled() {
+                    ui.label(
+                        RichText::new("Disabled by your administrator (OBSIDIA_NO_UPDATE_CHECK).")
+                            .color(ORANGE)
+                            .small(),
+                    );
+                }
+                if ui.button("Check now").clicked() {
+                    self.update_dismissed = false;
+                    self.check_for_updates(true);
+                }
+                ui.add_space(10.0);
+
+                ui.label(RichText::new("Folders").strong());
+                let base = firmware::data_dir();
+                egui::Grid::new("folders").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
+                    for (label, dir) in [
+                        ("Firmware", base.join("Firmware")),
+                        ("Backups", base.join("Backups")),
+                        ("Logs", base.join("Logs")),
+                    ] {
+                        ui.label(RichText::new(label).weak());
+                        ui.label(RichText::new(dir.display().to_string()).small());
+                        if ui.small_button("Open").clicked() {
+                            let _ = std::fs::create_dir_all(&dir);
+                            open_path(&dir);
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+        self.show_settings = open;
+        if changed {
+            self.settings.save();
+            self.clean_pending = true;
+        }
+    }
+
     fn local_firmware_page(&mut self, ui: &mut egui::Ui) {
         page_title(
             ui,
             "Local Firmware",
-            "Firmware files downloaded by Obsidia.",
+            "Downloaded firmware is reused as long as Apple still signs it.",
         );
         ui.horizontal(|ui| {
             if ui.button("⤓ Import Local Firmware").clicked() {
                 self.import_local_firmware();
             }
             if ui.button("🗀 Open Folder").clicked() {
-                if let Ok(dir) = firmware::cache_dir() {
+                if let Ok(dir) = firmware::firmware_dir() {
                     open_path(&dir);
                 }
             }
             if ui.button("⟳ Refresh").clicked() {
                 self.refresh_local_files();
+            }
+            let expired = self
+                .local_files
+                .iter()
+                .filter(|f| self.local_status(f) == LocalStatus::Expired)
+                .count();
+            if ui
+                .add_enabled(
+                    expired > 0 && !self.busy(),
+                    egui::Button::new(format!("🗑 Remove expired ({expired})")),
+                )
+                .clicked()
+            {
+                let n = self.remove_expired("Cleanup");
+                self.notice = Some((format!("Removed {n} expired firmware file(s)."), false));
+            }
+            if ui
+                .checkbox(&mut self.settings.auto_clean, "Auto-clean")
+                .on_hover_text("Automatically delete firmware that Apple no longer signs")
+                .changed()
+            {
+                self.settings.save();
+                self.clean_pending = true;
             }
         });
         ui.add_space(8.0);
@@ -1212,7 +1486,10 @@ impl App {
                 ui,
                 "🗀",
                 "No firmware downloaded yet",
-                "Downloaded firmware files appear here.",
+                &format!(
+                    "Downloaded firmware is stored in {}.",
+                    firmware::data_dir().join("Firmware").display()
+                ),
                 None,
             );
             return;
@@ -1224,31 +1501,64 @@ impl App {
         TableBuilder::new(ui)
             .striped(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::remainder().at_least(300.0))
-            .column(Column::exact(100.0))
-            .column(Column::exact(230.0))
+            .column(Column::remainder().at_least(150.0))
+            .column(Column::exact(115.0))
+            .column(Column::exact(75.0))
+            .column(Column::exact(95.0))
+            .column(Column::exact(205.0))
             .header(26.0, |mut h| {
-                for t in ["File", "Size", ""] {
+                for t in ["File", "Version", "Size", "Status", ""] {
                     h.col(|ui| {
                         ui.label(RichText::new(t).strong());
                     });
                 }
             })
             .body(|mut body| {
-                for (path, size) in &files {
+                for file in &files {
+                    let status = self.local_status(file);
                     body.row(36.0, |mut row| {
                         row.col(|ui| {
-                            ui.label(file_name(path));
+                            ui.add(egui::Label::new(file.file_name()).truncate())
+                                .on_hover_text(file.path.display().to_string());
                         });
                         row.col(|ui| {
-                            ui.label(HumanBytes(*size).to_string());
+                            let text = match (&file.version, &file.buildid) {
+                                (Some(v), Some(b)) => format!("{v} ({b})"),
+                                (None, Some(b)) => b.clone(),
+                                _ => "-".to_string(),
+                            };
+                            ui.label(text);
                         });
                         row.col(|ui| {
-                            if ui.button("Use for flashing").clicked() {
-                                select = Some(path.clone());
+                            ui.label(HumanBytes(file.size).to_string());
+                        });
+                        row.col(|ui| match status {
+                            LocalStatus::Signed => {
+                                ui.label(RichText::new("● Signed").color(GREEN));
+                            }
+                            LocalStatus::Expired => {
+                                ui.label(RichText::new("○ Expired").color(RED))
+                                    .on_hover_text("Apple no longer signs this firmware");
+                            }
+                            LocalStatus::Checking => {
+                                ui.spinner();
+                            }
+                            LocalStatus::Unknown => {
+                                ui.label(RichText::new("? Unknown").weak())
+                                    .on_hover_text("Signing status could not be determined");
+                            }
+                        });
+                        row.col(|ui| {
+                            let usable = status != LocalStatus::Expired;
+                            if ui
+                                .add_enabled(usable, egui::Button::new("Use for flashing"))
+                                .on_disabled_hover_text("Apple no longer signs this firmware")
+                                .clicked()
+                            {
+                                select = Some(file.path.clone());
                             }
                             if ui.button("🗑 Delete").clicked() {
-                                delete = Some(path.clone());
+                                delete = Some(file.path.clone());
                             }
                         });
                     });
@@ -1260,7 +1570,7 @@ impl App {
             self.page = FlashPage::SmartFlash;
         }
         if let Some(p) = delete {
-            match std::fs::remove_file(&p) {
+            match firmware::delete_local(&p) {
                 Ok(()) => self.log(format!("Deleted {}", p.display())),
                 Err(e) => self.log(format!("Could not delete {}: {e}", p.display())),
             }
@@ -1552,6 +1862,11 @@ impl App {
                     {
                         close = true;
                     }
+                    ui.add_space(6.0);
+                    if ui.button("How to enter DFU mode").clicked() {
+                        close = true;
+                        self.page = FlashPage::Guide;
+                    }
                 }
                 (None, None) => close = true,
             }
@@ -1606,7 +1921,9 @@ impl App {
         } else {
             ui.label(RichText::new(&model).size(17.0).strong());
         }
-        ui.label(RichText::new(&dev.name).weak());
+        if dev.name != model && dev.name != "-" {
+            ui.label(RichText::new(&dev.name).weak());
+        }
         ui.add_space(8.0);
 
         egui::Grid::new("side_info")
@@ -1738,7 +2055,9 @@ impl App {
             ui.add_space(20.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new(&model).size(26.0).strong());
-                ui.label(RichText::new(&dev.name).weak().size(15.0));
+                if dev.name != model && dev.name != "-" {
+                    ui.label(RichText::new(&dev.name).weak().size(15.0));
+                }
                 ui.add_space(6.0);
                 mode_badge(ui, &dev.mode);
                 ui.add_space(14.0);
@@ -1753,7 +2072,7 @@ impl App {
                                 ui.label(v);
                                 ui.end_row();
                             };
-                            row("Product type", dev.product.clone());
+                            row("Model identifier", dev.product.clone());
                             if let Some(v) = &dev.version {
                                 row(
                                     if dev.kind() == "iPad" {
@@ -1858,7 +2177,7 @@ impl App {
                 open_path(&dir);
             }
             if tool_tile(ui, "⬇", "Firmware", "Open the firmware folder", true) {
-                if let Ok(dir) = firmware::cache_dir() {
+                if let Ok(dir) = firmware::firmware_dir() {
                     open_path(&dir);
                 }
             }
@@ -1869,6 +2188,13 @@ impl App {
             if tool_tile(ui, "⟳", "Updates", "Check for a new version", !checking) {
                 self.update_dismissed = false;
                 self.check_for_updates(true);
+            }
+            if tool_tile(ui, "📖", "Recovery & DFU", "Step-by-step guides", true) {
+                self.tab = Tab::Flash;
+                self.page = FlashPage::Guide;
+            }
+            if tool_tile(ui, "⚙", "Settings", "Auto-clean, updates, folders", true) {
+                self.show_settings = true;
             }
         });
 
@@ -2011,6 +2337,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.process_messages();
         self.maybe_scan();
+        self.auto_clean();
         self.handle_dropped_files(&ctx);
         ctx.request_repaint_after(Duration::from_millis(if self.busy() { 250 } else { 1000 }));
 
@@ -2069,6 +2396,7 @@ impl eframe::App for App {
                                 FlashPage::SmartFlash => self.smart_flash_page(ui),
                                 FlashPage::FirmwareDownload => self.firmware_download_page(ui),
                                 FlashPage::LocalFirmware => self.local_firmware_page(ui),
+                                FlashPage::Guide => self.guide_page(ui),
                             }
                         })
                     });
@@ -2093,6 +2421,7 @@ impl eframe::App for App {
 
         self.log_window(&ctx);
         self.release_notes_window(&ctx);
+        self.settings_window(&ctx);
         self.flash_dialog(&ctx);
     }
 }
@@ -2151,6 +2480,18 @@ fn nav_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
         );
     }
     resp
+}
+
+fn link(ui: &mut egui::Ui, text: &str, url: &str) {
+    let resp = ui
+        .add(
+            egui::Label::new(RichText::new(text).small().color(ACCENT)).sense(egui::Sense::click()),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(url);
+    if resp.clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+    }
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
@@ -2349,4 +2690,43 @@ fn open_path(path: &Path) {
         "xdg-open"
     };
     let _ = std::process::Command::new(program).arg(path).spawn();
+}
+
+/// Last "ERROR: ..." line printed by idevicerestore, without the prefix noise.
+fn last_error_line(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .rev()
+        .find_map(|l| l.find("ERROR:").map(|i| l[i..].trim().to_string()))
+}
+
+/// Save the output of a restore to Documents/Obsidia/Logs.
+fn write_restore_log(lines: &[String]) -> Option<PathBuf> {
+    let dir = firmware::logs_dir().ok()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("restore-{stamp}.log"));
+    std::fs::write(&path, lines.join("\n")).ok()?;
+    Some(path)
+}
+
+fn steps(ui: &mut egui::Ui, steps: &[&str]) {
+    for (i, step) in steps.iter().enumerate() {
+        ui.horizontal_top(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(rect.center(), 10.0, Color32::from_white_alpha(18));
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                (i + 1).to_string(),
+                egui::FontId::proportional(12.0),
+                ACCENT,
+            );
+            ui.add(egui::Label::new(*step).wrap());
+        });
+        ui.add_space(4.0);
+    }
 }

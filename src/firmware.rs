@@ -1,7 +1,7 @@
 //! Firmware metadata (ipsw.me API) and IPSW downloads.
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -26,6 +26,9 @@ pub struct DeviceInfo {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Firmware {
+    /// Product type this entry was listed for, e.g. `iPhone14,5`.
+    #[serde(default)]
+    pub identifier: String,
     pub version: String,
     pub buildid: String,
     pub url: String,
@@ -51,9 +54,9 @@ impl Firmware {
             .unwrap_or("")
     }
 
-    /// Path in the cache; exists once the download has completed.
+    /// Path in the firmware folder; exists once the download has completed.
     pub fn cache_path(&self) -> Result<PathBuf> {
-        Ok(cache_dir()?.join(self.file_name()))
+        Ok(firmware_dir()?.join(self.file_name()))
     }
 
     pub fn is_cached(&self) -> bool {
@@ -121,6 +124,50 @@ pub fn resolve_firmware(product: &str, version: Option<&str>) -> Result<Firmware
     }
 }
 
+/// `Documents/Obsidia` - firmware, backups and logs live here.
+pub fn data_dir() -> PathBuf {
+    dirs::document_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Documents")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Obsidia")
+}
+
+pub fn firmware_dir() -> Result<PathBuf> {
+    let dir = data_dir().join("Firmware");
+    fs::create_dir_all(&dir)?;
+    migrate_old_cache(&dir);
+    Ok(dir)
+}
+
+pub fn logs_dir() -> Result<PathBuf> {
+    let dir = data_dir().join("Logs");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Older versions kept firmware in the cache folder; move it over once.
+fn migrate_old_cache(target: &Path) {
+    let Some(old) = dirs::cache_dir().map(|d| d.join("obsidia")) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&old) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_firmware = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".ipsw") || n.ends_with(".ipsw.part"));
+        if is_firmware {
+            if let Some(name) = path.file_name() {
+                let _ = fs::rename(&path, target.join(name));
+            }
+        }
+    }
+}
+
+/// Cache folder for temporary files such as update installers.
 pub fn cache_dir() -> Result<PathBuf> {
     let base = dirs::cache_dir().ok_or_else(|| anyhow!("no cache directory available"))?;
     let dir = base.join("obsidia");
@@ -140,6 +187,121 @@ fn sha1_of(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// Stored next to each downloaded IPSW (`<name>.ipsw.json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FirmwareMeta {
+    pub product: String,
+    pub version: String,
+    pub buildid: String,
+    #[serde(default)]
+    pub sha1sum: Option<String>,
+    #[serde(default)]
+    pub size: u64,
+}
+
+fn meta_path(ipsw: &Path) -> PathBuf {
+    ipsw.with_extension("ipsw.json")
+}
+
+pub fn read_meta(ipsw: &Path) -> Option<FirmwareMeta> {
+    let text = fs::read_to_string(meta_path(ipsw)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_meta(ipsw: &Path, fw: &Firmware) {
+    let meta = FirmwareMeta {
+        product: fw.identifier.clone(),
+        version: fw.version.clone(),
+        buildid: fw.buildid.clone(),
+        sha1sum: fw.sha1sum.clone(),
+        size: fs::metadata(ipsw).map(|m| m.len()).unwrap_or(0),
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&meta) {
+        let _ = fs::write(meta_path(ipsw), json);
+    }
+}
+
+/// An IPSW in the firmware folder.
+#[derive(Debug, Clone)]
+pub struct LocalFirmware {
+    pub path: PathBuf,
+    pub size: u64,
+    pub product: Option<String>,
+    pub version: Option<String>,
+    pub buildid: Option<String>,
+}
+
+impl LocalFirmware {
+    pub fn file_name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+}
+
+pub fn local_firmware() -> Vec<LocalFirmware> {
+    let Ok(dir) = firmware_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut list: Vec<LocalFirmware> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("ipsw"))
+        })
+        .map(|path| {
+            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let meta = read_meta(&path);
+            let (product, buildid) = match &meta {
+                Some(m) => (Some(m.product.clone()), Some(m.buildid.clone())),
+                None => parse_file_name(&path),
+            };
+            LocalFirmware {
+                version: meta.map(|m| m.version),
+                path,
+                size,
+                product: product.filter(|p| !p.is_empty()),
+                buildid,
+            }
+        })
+        .collect();
+    list.sort_by(|a, b| a.path.cmp(&b.path));
+    list
+}
+
+/// Best effort for files without metadata, e.g. `iPhone14,5_18.2_22C152_Restore.ipsw`.
+fn parse_file_name(path: &Path) -> (Option<String>, Option<String>) {
+    let name = path.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+    let parts: Vec<&str> = name.split('_').collect();
+    // shared firmware lists several products: "iPhone13,2,iPhone13,3_..."
+    let product = parts
+        .first()
+        .filter(|p| (p.starts_with("iPhone") || p.starts_with("iPad")) && p.contains(','))
+        .map(|p| p.splitn(3, ',').take(2).collect::<Vec<_>>().join(","));
+    let buildid = parts
+        .iter()
+        .position(|p| *p == "Restore")
+        .and_then(|i| i.checked_sub(1))
+        .map(|i| parts[i].to_string());
+    (product, buildid)
+}
+
+pub fn delete_local(path: &Path) -> Result<()> {
+    fs::remove_file(path)?;
+    let _ = fs::remove_file(meta_path(path));
+    // idevicerestore extracts parts of the IPSW into a folder next to it
+    let extracted = path.with_extension("");
+    if extracted.is_dir() {
+        let _ = fs::remove_dir_all(extracted);
+    }
+    Ok(())
 }
 
 fn verify(path: &Path, fw: &Firmware) -> Result<bool> {
@@ -167,8 +329,17 @@ pub fn download(
     let part = path.with_extension("ipsw.part");
 
     if path.exists() {
+        // Reuse an earlier download. Files verified before (metadata with the
+        // same checksum and size) are not hashed again.
+        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let known_good =
+            read_meta(&path).is_some_and(|m| m.sha1sum == fw.sha1sum && m.size == size && size > 0);
+        if known_good {
+            return Ok(path);
+        }
         progress(Progress::Verifying);
         if verify(&path, fw)? {
+            write_meta(&path, fw);
             return Ok(path);
         }
         fs::remove_file(&path)?;
@@ -221,5 +392,6 @@ pub fn download(
         bail!("SHA-1 mismatch - download corrupted, please retry");
     }
     fs::rename(&part, &path)?;
+    write_meta(&path, fw);
     Ok(path)
 }

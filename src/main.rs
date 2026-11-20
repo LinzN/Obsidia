@@ -9,6 +9,8 @@ mod cli;
 mod device;
 mod firmware;
 mod gui;
+mod guides;
+mod settings;
 mod theme;
 mod updater;
 

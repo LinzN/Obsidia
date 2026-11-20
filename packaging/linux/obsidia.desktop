@@ -2,7 +2,7 @@
 Type=Application
 Name=Obsidia
 GenericName=iPhone & iPad Firmware Tool
-Comment=Flash, update and restore iPhone and iPad firmware
+Comment=Flash, update and restore iPhone and iPad firmware - a MirraNET project
 Exec=obsidia
 Icon=obsidia
 Terminal=false

@@ -100,6 +100,19 @@ pub fn tool_cmd(name: &str) -> Result<Command> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
+        // The MSYS2 builds of libcurl / OpenSSL look for their CA bundle at
+        // <tools>/../etc/ssl/certs; point them there explicitly as well.
+        if let Some(root) = path.parent().and_then(Path::parent) {
+            let bundle = root
+                .join("etc")
+                .join("ssl")
+                .join("certs")
+                .join("ca-bundle.crt");
+            if bundle.is_file() {
+                cmd.env("CURL_CA_BUNDLE", &bundle);
+                cmd.env("SSL_CERT_FILE", &bundle);
+            }
+        }
         if let Some(dir) = path.parent() {
             let mut paths = vec![dir.to_path_buf()];
             if let Some(old) = std::env::var_os("PATH") {
@@ -309,10 +322,7 @@ pub fn exit_recovery() -> Result<()> {
 
 /// Default backup directory for a device.
 pub fn default_backup_dir() -> PathBuf {
-    dirs::document_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Obsidia Backups")
+    crate::firmware::data_dir().join("Backups")
 }
 
 /// Command that creates a backup of `dev` into `dir`.

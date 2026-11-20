@@ -17,7 +17,8 @@
 
     <Icon Id="AppIcon" SourceFile="$(Root)\assets\obsidia.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/LinzN/obsidia" />
+    <Property Id="ARPURLINFOABOUT" Value="https://mirranet.de" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/LinzN/obsidia/releases" />
     <Property Id="ARPHELPLINK" Value="https://github.com/LinzN/obsidia/issues" />
 
     <WixVariable Id="WixUILicenseRtf" Value="$(Root)\packaging\windows\license.rtf" />
@@ -26,6 +27,7 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Obsidia">
         <Directory Id="TOOLSFOLDER" Name="tools" />
+        <Directory Id="ETCFOLDER" Name="etc" />
       </Directory>
     </StandardDirectory>
 
@@ -37,6 +39,7 @@
         <File Source="$(Root)\LICENSE" Name="LICENSE.txt" />
       </Component>
       <Files Directory="TOOLSFOLDER" Include="$(Root)\dist\tools\**" />
+      <Files Directory="ETCFOLDER" Include="$(Root)\dist\etc\**" />
 
       <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder">
         <Shortcut Name="Obsidia" Description="iPhone &amp; iPad firmware tool"

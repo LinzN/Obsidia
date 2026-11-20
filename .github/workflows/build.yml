@@ -56,7 +56,9 @@ jobs:
               cp -n "$dll" dist/tools/ || true
             done
           done
-          cp /ucrt64/etc/ssl/certs/ca-bundle.crt dist/tools/curl-ca-bundle.crt
+          # libcurl from MSYS2 resolves its CA bundle relative to the DLL: <tools>/../etc/ssl/certs
+          mkdir -p dist/etc/ssl/certs
+          cp /ucrt64/etc/ssl/certs/ca-bundle.crt dist/etc/ssl/certs/ca-bundle.crt
 
       - name: Build MSI
         shell: pwsh

@@ -4,6 +4,12 @@
 
 <h1 align="center">Obsidia</h1>
 
+<p align="center">
+  A <a href="https://mirranet.de">MirraNET</a> project ·
+  <a href="https://github.com/LinzN/obsidia">GitHub</a> ·
+  <a href="https://github.com/LinzN/obsidia/releases">Releases</a>
+</p>
+
 A firmware flashing tool for **iPhone and iPad**, written in Rust.
 Runs on **Windows**, **Linux** and **macOS** - with a modern graphical interface and a full CLI.
 
@@ -24,6 +30,8 @@ from [ipsw.me](https://ipsw.me).
 - **Download** IPSW files with progress, resume and SHA-1 verification
 - **Flash** with one click: clean restore (erase) or update (keep data)
 - Drag & drop a local `.ipsw` onto the window to flash it
+- Downloaded firmware is reused while Apple signs it; optional auto-clean removes expired files
+- Step-by-step guides for recovery and DFU mode for every iPhone and iPad generation
 - Backup, enter / exit recovery mode
 - Live log with progress of every operation
 
@@ -65,6 +73,16 @@ brew install libimobiledevice libirecovery idevicerestore
 Open `obsidia-<version>-macos-arm64.dmg` and drag Obsidia into *Applications*. The app is
 not notarized yet: on first launch right-click it and choose *Open*.
 
+## Files
+
+Everything Obsidia stores lives in `Documents/Obsidia`:
+
+| Folder | Content |
+|---|---|
+| `Firmware` | Downloaded IPSW files (reused while signed) |
+| `Backups` | Device backups |
+| `Logs` | Log of every restore |
+
 ## Updates
 
 Obsidia checks GitHub for a new release on start-up. If one is available, an info bar
@@ -94,7 +112,7 @@ obsidia list                          # show connected devices
 obsidia firmwares                     # signed firmwares for the connected device
 obsidia firmwares -p iPad13,18 --all  # any model, incl. unsigned
 obsidia download -v 18.1              # download into the cache
-obsidia backup                        # backup into Documents/Obsidia Backups
+obsidia backup                        # backup into Documents/Obsidia/Backups
 obsidia flash                         # erase-restore to the latest signed firmware
 obsidia flash -v 18.1 --update        # update to a specific version, keep data
 obsidia flash -f ~/Downloads/x.ipsw   # local IPSW
@@ -131,6 +149,11 @@ Run workflow* (or push a matching `v*` tag).
 
 A security assessment for companies evaluating Obsidia is available in
 [docs/SECURITY_ASSESSMENT.md](docs/SECURITY_ASSESSMENT.md).
+
+## About
+
+Obsidia is developed by [MirraNET](https://mirranet.de). Source code, issues and releases:
+[github.com/LinzN/obsidia](https://github.com/LinzN/obsidia).
 
 ## License
 

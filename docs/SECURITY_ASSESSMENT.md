@@ -4,6 +4,7 @@
 |---|---|
 | **Document type** | Vendor self-assessment for software onboarding |
 | **Product** | Obsidia – iPhone / iPad firmware tool |
+| **Vendor** | MirraNET ([mirranet.de](https://mirranet.de)) |
 | **Version covered** | 0.4.x |
 | **Platforms** | Windows 10/11 (x64), Debian/Ubuntu (amd64), macOS 11+ (Apple Silicon) |
 | **Date** | 2026-11-20 |
@@ -87,24 +88,26 @@ and macOS they come from the system package manager.
 |---|---|---|---|
 | Device model (product type, e.g. `iPhone14,5`) | Memory only | Yes – to ipsw.me to list firmware | Public |
 | UDID, ECID, serial number, device name, OS version, battery level, capacity | Memory, shown in the UI and log window | ECID and related identifiers are sent to Apple during a restore (required by Apple's restore process) | Internal / personal data if the device is assigned to a person |
-| Firmware files (`.ipsw`) | Cache folder (see below) | No | Public (Apple software) |
-| Device backups | `Documents/Obsidia Backups` | No | **Confidential** – may contain personal and business data |
+| Firmware files (`.ipsw`) and their metadata (`.ipsw.json`) | `Documents/Obsidia/Firmware` | No | Public (Apple software) |
+| Device backups | `Documents/Obsidia/Backups` | No | **Confidential** – may contain personal and business data |
+| Restore logs | `Documents/Obsidia/Logs` | No | Internal – contain device identifiers (ECID, serial number) |
 | Activity log | Memory only, can be copied by the user | No | Internal |
+| Settings (auto-clean, update check) | `obsidia/settings.json` in the user config folder | No | Internal |
 
-Storage locations:
+Storage locations: all user data lives in `Documents/Obsidia` (`%USERPROFILE%\Documents\Obsidia`
+on Windows, `~/Documents/Obsidia` on Linux and macOS). Update installers are kept in the
+user cache folder (`%LOCALAPPDATA%\obsidia\updates`, `~/.cache/obsidia/updates`,
+`~/Library/Caches/obsidia/updates`). Settings are stored in `%APPDATA%\obsidia`,
+`~/.config/obsidia` or `~/Library/Application Support/obsidia`.
 
-| Platform | Firmware cache | Backups |
-|---|---|---|
-| Windows | `%LOCALAPPDATA%\obsidia` | `%USERPROFILE%\Documents\Obsidia Backups` |
-| Linux | `~/.cache/obsidia` | `~/Documents/Obsidia Backups` |
-| macOS | `~/Library/Caches/obsidia` | `~/Documents/Obsidia Backups` |
+Downloaded firmware is reused as long as Apple still signs it. With **auto-clean** enabled,
+files that Apple no longer signs are deleted automatically.
 
 **Backups:** Backups are created with `idevicebackup2`. They are only encrypted if backup
 encryption is enabled on the device itself. Without it, backups contain readable personal
 data (messages, photos, contacts, app data) on the workstation's disk.
 
-Obsidia does not store passwords, Apple ID credentials or any other secrets, and it has no
-configuration files.
+Obsidia does not store passwords, Apple ID credentials or any other secrets.
 
 ---
 
@@ -251,7 +254,7 @@ Use this checklist in the software approval process.
 **Data protection**
 - [ ] Backup storage location defined, on an encrypted volume
 - [ ] Backup encryption enabled on managed devices
-- [ ] Retention and deletion rules for backups and firmware cache defined
+- [ ] Retention and deletion rules for backups, restore logs and firmware defined (auto-clean on or off)
 
 **Device management**
 - [ ] Devices enrolled via Automated Device Enrollment so they re-enroll after a restore
