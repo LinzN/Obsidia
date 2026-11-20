@@ -2,7 +2,7 @@
 
 use crate::device::{self, Device, Mode};
 use crate::firmware::{self, CatalogEntry, DeviceInfo, Firmware, Progress};
-use crate::theme::{self, Glass, ACCENT, GREEN, ORANGE, RED};
+use crate::theme::{self, Surface, ACCENT, DANGER, GREEN, ORANGE, RED};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use egui_extras::{Column, TableBuilder};
 use indicatif::HumanBytes;
@@ -781,7 +781,7 @@ impl App {
         ui.add_space(8.0);
 
         if let Some(Selection::Local(path)) = self.selection.clone() {
-            theme::glass(ui, Glass::Card, |ui| {
+            theme::surface(ui, Surface::Card, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("◉").color(ACCENT));
@@ -1193,7 +1193,7 @@ impl App {
                     );
                 }
                 Some(Err(_)) => {
-                    ui.painter().circle_filled(badge, 22.0, RED);
+                    ui.painter().circle_filled(badge, 22.0, DANGER);
                     ui.painter().text(
                         badge,
                         egui::Align2::CENTER_CENTER,
@@ -1256,7 +1256,7 @@ impl App {
                         egui::ProgressBar::new(1.0)
                             .desired_width(width)
                             .desired_height(8.0)
-                            .fill(RED),
+                            .fill(DANGER),
                     );
                     ui.add_space(14.0);
                     ui.label(
@@ -1466,7 +1466,7 @@ impl App {
                 ui.add_space(6.0);
                 mode_badge(ui, &dev.mode);
                 ui.add_space(14.0);
-                theme::glass(ui, Glass::Card, |ui| {
+                theme::surface(ui, Surface::Card, |ui| {
                     ui.set_width(ui.available_width().min(560.0));
                     egui::Grid::new("device_info")
                         .num_columns(2)
@@ -1598,7 +1598,7 @@ impl App {
     }
 
     fn tools_banner(&mut self, ui: &mut egui::Ui) {
-        theme::glass_frame(Glass::Card)
+        theme::surface_frame(Surface::Card)
             .fill(ORANGE.gamma_multiply(0.14))
             .stroke(Stroke::new(1.0, ORANGE.gamma_multiply(0.6)))
             .show(ui, |ui| {
@@ -1654,7 +1654,7 @@ impl App {
         let mut action = None;
         egui::Modal::new(egui::Id::unique("flash_confirm"))
             .backdrop_color(Color32::from_black_alpha(140))
-            .frame(theme::glass_frame(Glass::Tinted).fill(Color32::from_rgba_unmultiplied(30, 33, 39, 245)).inner_margin(22))
+            .frame(theme::surface_frame(Surface::Raised).inner_margin(22))
             .show(ctx, |ui| {
                 ui.set_width(440.0);
                 ui.heading("Flash firmware");
@@ -1689,7 +1689,7 @@ impl App {
                         action = Some(false);
                     }
                     let txt = if req.erase { "Erase & flash" } else { "Update" };
-                    if ui.add(theme::accent_button(txt, if req.erase { RED } else { ACCENT }, true)).clicked() {
+                    if ui.add(theme::accent_button(txt, if req.erase { DANGER } else { ACCENT }, true)).clicked() {
                         action = Some(true);
                     }
                 });
@@ -1745,20 +1745,13 @@ impl eframe::App for App {
 
         egui::Panel::top("header")
             .show_separator_line(false)
-            .frame(outer(14, 14, 14, 6))
-            .show(ui, |ui| {
-                theme::glass(ui, Glass::Panel, |ui| {
-                    ui.set_width(ui.available_width());
-                    self.header(ui);
-                })
-            });
+            .frame(outer(16, 16, 10, 6))
+            .show(ui, |ui| self.header(ui));
 
         egui::Panel::bottom("status")
             .show_separator_line(false)
             .frame(outer(18, 18, 2, 8))
-            .show(ui, |ui| {
-                self.status_bar(ui);
-            });
+            .show(ui, |ui| self.status_bar(ui));
 
         match self.tab {
             Tab::Flash => {
@@ -1766,23 +1759,21 @@ impl eframe::App for App {
                     .resizable(false)
                     .show_separator_line(false)
                     .exact_size(220.0)
-                    .frame(outer(14, 6, 6, 6))
-                    .show(ui, |ui| {
-                        theme::glass_fill(ui, Glass::Panel, |ui| self.sidebar(ui))
-                    });
+                    .frame(outer(10, 4, 4, 4))
+                    .show(ui, |ui| self.sidebar(ui));
 
                 egui::Panel::right("device_side")
                     .resizable(false)
                     .show_separator_line(false)
                     .exact_size(300.0)
-                    .frame(outer(6, 14, 6, 6))
+                    .frame(outer(4, 12, 4, 4))
                     .show(ui, |ui| {
-                        theme::glass_fill(ui, Glass::Panel, |ui| self.device_side_panel(ui))
+                        theme::surface_fill(ui, Surface::Layer, |ui| self.device_side_panel(ui))
                     });
 
                 egui::CentralPanel::no_frame().show(ui, |ui| {
-                    outer(6, 6, 6, 6).show(ui, |ui| {
-                        theme::glass_fill(ui, Glass::Panel, |ui| {
+                    outer(4, 4, 4, 4).show(ui, |ui| {
+                        theme::surface_fill(ui, Surface::Layer, |ui| {
                             if !self.missing_tools.is_empty() {
                                 self.tools_banner(ui);
                             }
@@ -1797,8 +1788,8 @@ impl eframe::App for App {
             }
             Tab::Device | Tab::Toolbox => {
                 egui::CentralPanel::no_frame().show(ui, |ui| {
-                    outer(14, 14, 6, 6).show(ui, |ui| {
-                        theme::glass_fill(ui, Glass::Panel, |ui| {
+                    outer(12, 12, 4, 4).show(ui, |ui| {
+                        theme::surface_fill(ui, Surface::Layer, |ui| {
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 if self.tab == Tab::Device {
                                     self.device_tab(ui);
@@ -1817,44 +1808,56 @@ impl eframe::App for App {
     }
 }
 
+/// Selector-bar style tab: plain text, accent pill under the active tab.
 fn tab_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
-    let text = RichText::new(label).size(15.0);
-    let btn = if active {
-        egui::Button::new(text.color(Color32::WHITE).strong())
-            .fill(ACCENT.gamma_multiply(0.85))
-            .stroke(Stroke::new(1.0, Color32::from_white_alpha(70)))
+    let text = if active {
+        RichText::new(label).size(15.0).strong()
     } else {
-        egui::Button::new(text)
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-    };
-    ui.add(btn.corner_radius(16).min_size(egui::vec2(96.0, 32.0)))
-}
-
-fn nav_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
-    let text = RichText::new(label).size(14.0);
-    let btn = if active {
-        egui::Button::new(text.strong())
-            .fill(Color32::from_white_alpha(30))
-            .stroke(Stroke::new(1.0, Color32::from_white_alpha(46)))
-    } else {
-        egui::Button::new(text)
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
+        RichText::new(label)
+            .size(15.0)
+            .color(Color32::from_gray(200))
     };
     let resp = ui.add(
-        btn.corner_radius(12)
+        egui::Button::new(text)
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .corner_radius(4)
+            .min_size(egui::vec2(84.0, 36.0)),
+    );
+    if active {
+        let r = resp.rect;
+        let pill = egui::Rect::from_center_size(
+            egui::pos2(r.center().x, r.bottom() - 2.0),
+            egui::vec2(18.0, 3.0),
+        );
+        ui.painter().rect_filled(pill, 1.5, ACCENT);
+    }
+    resp
+}
+
+/// Navigation view item with the accent indicator on the left.
+fn nav_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
+    let text = RichText::new(label).size(14.0);
+    let fill = if active {
+        Color32::from_white_alpha(14)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let resp = ui.add(
+        egui::Button::new(text)
+            .fill(fill)
+            .stroke(Stroke::NONE)
+            .corner_radius(4)
             .min_size(egui::vec2(ui.available_width(), 36.0)),
     );
     if active {
-        // Accent marker on the left edge of the active item.
         let r = resp.rect;
         ui.painter().rect_filled(
             egui::Rect::from_min_size(
-                r.left_top() + egui::vec2(3.0, 9.0),
-                egui::vec2(3.0, r.height() - 18.0),
+                r.left_top() + egui::vec2(0.0, 10.0),
+                egui::vec2(3.0, r.height() - 20.0),
             ),
-            2.0,
+            1.5,
             ACCENT,
         );
     }
@@ -2004,7 +2007,7 @@ fn device_picture(ui: &mut egui::Ui, kind: &str, height: f32, screen_on: bool) {
         p.rect_filled(island, width * 0.04, Color32::BLACK);
     }
 
-    // Glass reflection.
+    // top edge highlight
     p.line_segment(
         [
             rect.left_top() + egui::vec2(radius, 1.5),

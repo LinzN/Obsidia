@@ -5,7 +5,7 @@
 <h1 align="center">Obsidia</h1>
 
 A firmware flashing tool for **iPhone and iPad**, written in Rust.
-Runs on **Windows**, **Linux** and **macOS** - with a modern glass-styled graphical interface and a full CLI.
+Runs on **Windows**, **Linux** and **macOS** - with a modern graphical interface and a full CLI.
 
 ![Obsidia](docs/screenshot.png)
 
@@ -105,8 +105,9 @@ On Linux the GUI needs the usual X11/Wayland development headers:
 `libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev`.
 
 Packaging lives in `packaging/` (WiX MSI, `cargo deb`, `.app`/`.dmg`). GitHub Actions
-builds all installers on every push and publishes a release whenever the version in
-`Cargo.toml` changes.
+builds all installers on every push (`build.yml`). Releases are published separately by
+the `Release` workflow: bump the version in `Cargo.toml`, then run *Actions > Release >
+Run workflow* (or push a matching `v*` tag).
 
 ## Troubleshooting
 

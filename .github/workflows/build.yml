@@ -3,15 +3,15 @@ name: Build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -122,42 +122,3 @@ jobs:
           name: macos
           path: out/*.dmg
           if-no-files-found: error
-
-  # A release is published whenever the version in Cargo.toml changes on main
-  # (or a v* tag is pushed).
-  release:
-    name: Release
-    needs: [windows, linux, macos]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check version
-        id: version
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="v$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          if [[ "$GITHUB_REF" == refs/tags/* ]] || ! gh release view "$tag" >/dev/null 2>&1; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Release $tag already exists"
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/download-artifact@v4
-        if: steps.version.outputs.publish == 'true'
-        with:
-          path: dist
-          merge-multiple: true
-
-      - uses: softprops/action-gh-release@v2
-        if: steps.version.outputs.publish == 'true'
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Obsidia ${{ steps.version.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          files: dist/*
-          generate_release_notes: true

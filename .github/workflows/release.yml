@@ -1,0 +1,75 @@
+name: Release
+
+# Builds all installers and publishes a GitHub release for the version in
+# Cargo.toml. Start it manually under Actions > Release > Run workflow, or by
+# pushing a v* tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: Mark as pre-release
+        type: boolean
+        default: false
+      draft:
+        description: Create as draft
+        type: boolean
+        default: false
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $tag"
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists - bump the version in Cargo.toml first"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    uses: ./.github/workflows/build.yml
+
+  publish:
+    name: Publish
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check.outputs.tag }}
+          name: Obsidia ${{ needs.check.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ inputs.prerelease || false }}
+          draft: ${{ inputs.draft || false }}
+          files: dist/*
+          generate_release_notes: true

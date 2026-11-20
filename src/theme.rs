@@ -1,241 +1,194 @@
-//! Glass style for the GUI. egui has no backdrop blur, so the look is faked
-//! with a soft gradient background and translucent, highlighted panels.
+//! Fluent-like dark theme: a calm Mica-style background, layered surfaces with
+//! hairline borders, small corner radii and a light blue accent.
 
-use eframe::egui::{self, epaint, Color32, CornerRadius, Margin, Pos2, Rect, Shadow, Stroke};
+use eframe::egui::{self, epaint, Color32, CornerRadius, Margin, Shadow, Stroke};
 
-pub const ACCENT: Color32 = Color32::from_rgb(0x3d, 0x8b, 0xfd);
-pub const GREEN: Color32 = Color32::from_rgb(0x3f, 0xc8, 0x6e);
-pub const ORANGE: Color32 = Color32::from_rgb(0xf5, 0xa5, 0x24);
-pub const RED: Color32 = Color32::from_rgb(0xef, 0x4f, 0x5a);
+pub const ACCENT: Color32 = Color32::from_rgb(0x60, 0xcd, 0xff);
+pub const GREEN: Color32 = Color32::from_rgb(0x6c, 0xcb, 0x5f);
+pub const ORANGE: Color32 = Color32::from_rgb(0xfc, 0xe1, 0x00);
+pub const RED: Color32 = Color32::from_rgb(0xff, 0x99, 0xa4);
 
-pub const RADIUS: u8 = 20;
-const TEXT: Color32 = Color32::from_rgb(0xe9, 0xec, 0xf1);
+/// Fill for destructive actions (text on it is white).
+pub const DANGER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
 
-/// Configure global egui visuals for the glass theme.
+const TEXT: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
+const BASE: Color32 = Color32::from_rgb(0x20, 0x20, 0x20);
+const LAYER: Color32 = Color32::from_rgb(0x2b, 0x2b, 0x2b);
+
 pub fn apply(ctx: &egui::Context) {
+    load_system_font(ctx);
+
     let mut v = egui::Visuals::dark();
-    let pill = CornerRadius::same(12);
+    let control = CornerRadius::same(4);
 
     v.override_text_color = Some(TEXT);
+    v.weak_text_color = Some(Color32::from_rgb(0xc5, 0xc5, 0xc5));
     v.panel_fill = Color32::TRANSPARENT;
-    v.faint_bg_color = Color32::from_white_alpha(8);
-    v.extreme_bg_color = Color32::from_black_alpha(70);
-    v.code_bg_color = Color32::from_black_alpha(60);
+    v.faint_bg_color = Color32::from_white_alpha(5);
+    v.extreme_bg_color = Color32::from_rgb(0x1c, 0x1c, 0x1c);
+    v.code_bg_color = Color32::from_rgb(0x1c, 0x1c, 0x1c);
     v.hyperlink_color = ACCENT;
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.38);
-    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    v.selection.bg_fill = Color32::from_white_alpha(18);
+    v.selection.stroke = Stroke::new(1.0, TEXT);
 
-    v.window_fill = Color32::from_rgba_unmultiplied(30, 33, 39, 240);
-    v.window_stroke = Stroke::new(1.0, Color32::from_white_alpha(46));
-    v.window_corner_radius = CornerRadius::same(RADIUS);
-    v.menu_corner_radius = CornerRadius::same(14);
+    v.window_fill = Color32::from_rgb(0x2c, 0x2c, 0x2c);
+    v.window_stroke = Stroke::new(1.0, Color32::from_white_alpha(22));
+    v.window_corner_radius = CornerRadius::same(8);
+    v.menu_corner_radius = CornerRadius::same(8);
     v.window_shadow = Shadow {
-        offset: [0, 12],
-        blur: 40,
+        offset: [0, 8],
+        blur: 32,
         spread: 0,
         color: Color32::from_black_alpha(110),
     };
     v.popup_shadow = Shadow {
-        offset: [0, 8],
-        blur: 24,
+        offset: [0, 6],
+        blur: 18,
         spread: 0,
         color: Color32::from_black_alpha(90),
     };
 
     let w = &mut v.widgets;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_white_alpha(26));
+    w.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_white_alpha(16));
     w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
-    w.noninteractive.corner_radius = pill;
+    w.noninteractive.corner_radius = control;
 
     for (state, fill, stroke) in [
-        (&mut w.inactive, 20u8, 34u8),
-        (&mut w.hovered, 38, 70),
-        (&mut w.active, 58, 90),
-        (&mut w.open, 38, 70),
+        (&mut w.inactive, 15u8, 20u8),
+        (&mut w.hovered, 22, 26),
+        (&mut w.active, 10, 18),
+        (&mut w.open, 22, 26),
     ] {
         state.bg_fill = Color32::from_white_alpha(fill);
         state.weak_bg_fill = Color32::from_white_alpha(fill);
         state.bg_stroke = Stroke::new(1.0, Color32::from_white_alpha(stroke));
         state.fg_stroke = Stroke::new(1.0, TEXT);
-        state.corner_radius = pill;
+        state.corner_radius = control;
+        state.expansion = 0.0;
     }
-    w.hovered.expansion = 1.0;
-    w.active.expansion = 1.0;
 
     ctx.set_visuals(v);
 }
 
-/// Paint the colorful backdrop behind all glass surfaces.
+/// Use Segoe UI on Windows so the app matches the system look.
+fn load_system_font(ctx: &egui::Context) {
+    if !cfg!(windows) {
+        return;
+    }
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let Ok(bytes) = std::fs::read(format!("{windir}\\Fonts\\segoeui.ttf")) else {
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "segoe-ui".into(),
+        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+    );
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.insert(0, "segoe-ui".into());
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// Mica-like window background: almost flat with a faint tint.
 pub fn paint_backdrop(ui: &egui::Ui) {
     let rect = ui.max_rect();
-    let painter = ui.painter();
-
-    // Diagonal graphite gradient.
     let mut mesh = epaint::Mesh::default();
-    let corners = [
-        (rect.left_top(), Color32::from_rgb(0x1e, 0x22, 0x29)),
-        (rect.right_top(), Color32::from_rgb(0x17, 0x1b, 0x22)),
-        (rect.right_bottom(), Color32::from_rgb(0x0d, 0x0f, 0x13)),
-        (rect.left_bottom(), Color32::from_rgb(0x12, 0x15, 0x1a)),
-    ];
-    for (p, c) in corners {
+    for (p, c) in [
+        (rect.left_top(), Color32::from_rgb(0x22, 0x24, 0x27)),
+        (rect.right_top(), Color32::from_rgb(0x20, 0x22, 0x25)),
+        (rect.right_bottom(), BASE),
+        (rect.left_bottom(), Color32::from_rgb(0x1f, 0x20, 0x22)),
+    ] {
         mesh.colored_vertex(p, c);
     }
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
-    painter.add(mesh);
-
-    // Faint cool glows that the glass panels pick up - deliberately subtle.
-    let size = rect.size();
-    let blobs = [
-        (0.85, 0.05, 0.45, Color32::from_rgb(0x3d, 0x8b, 0xfd), 46u8),
-        (0.10, 0.95, 0.40, Color32::from_rgb(0x2a, 0xa6, 0xb8), 30),
-        (0.35, 0.30, 0.35, Color32::from_rgb(0x8f, 0xa6, 0xc4), 18),
-    ];
-    for (x, y, r, color, alpha) in blobs {
-        let center = rect.min + egui::vec2(size.x * x, size.y * y);
-        radial_blob(painter, center, size.x.max(size.y) * r, color, alpha);
-    }
+    ui.painter().add(mesh);
 }
 
-fn radial_blob(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32, alpha: u8) {
-    const SEGMENTS: u32 = 64;
-    let inner = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
-    let mut mesh = epaint::Mesh::default();
-    mesh.colored_vertex(center, inner);
-    for i in 0..SEGMENTS {
-        let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-        mesh.colored_vertex(
-            center + radius * egui::vec2(a.cos(), a.sin()),
-            Color32::TRANSPARENT,
-        );
-    }
-    for i in 0..SEGMENTS {
-        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % SEGMENTS);
-    }
-    painter.add(mesh);
-}
-
-/// Glass surface strengths.
 #[derive(Clone, Copy)]
-pub enum Glass {
-    /// Large floating panel.
-    Panel,
-    /// Card nested inside a panel.
+pub enum Surface {
+    /// Main content layer.
+    Layer,
+    /// Card inside a layer.
     Card,
-    /// Darker, calmer surface (log, dialogs).
-    Tinted,
+    /// Dialogs and notices.
+    Raised,
 }
 
-pub fn glass_frame(kind: Glass) -> egui::Frame {
-    let (fill, stroke, radius, margin, shadow) = match kind {
-        Glass::Panel => (
-            Color32::from_white_alpha(10),
-            Color32::from_white_alpha(32),
-            RADIUS,
-            14,
-            Shadow {
-                offset: [0, 10],
-                blur: 30,
-                spread: 0,
-                color: Color32::from_black_alpha(70),
-            },
-        ),
-        Glass::Card => (
-            Color32::from_white_alpha(9),
-            Color32::from_white_alpha(24),
-            14,
+pub fn surface_frame(kind: Surface) -> egui::Frame {
+    let (fill, stroke, margin, shadow) = match kind {
+        Surface::Layer => (LAYER, Color32::from_white_alpha(12), 16, Shadow::NONE),
+        Surface::Card => (
+            Color32::from_white_alpha(8),
+            Color32::from_white_alpha(14),
             12,
             Shadow::NONE,
         ),
-        Glass::Tinted => (
-            Color32::from_rgba_unmultiplied(6, 7, 10, 120),
-            Color32::from_white_alpha(36),
-            RADIUS,
-            12,
+        Surface::Raised => (
+            Color32::from_rgb(0x2c, 0x2c, 0x2c),
+            Color32::from_white_alpha(22),
+            16,
             Shadow {
-                offset: [0, 10],
-                blur: 30,
+                offset: [0, 4],
+                blur: 12,
                 spread: 0,
-                color: Color32::from_black_alpha(70),
+                color: Color32::from_black_alpha(60),
             },
         ),
     };
     egui::Frame::new()
         .fill(fill)
         .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(radius)
+        .corner_radius(8)
         .inner_margin(Margin::same(margin))
         .shadow(shadow)
 }
 
-/// Show `add` on a glass surface and paint its specular highlight.
-pub fn glass<R>(ui: &mut egui::Ui, kind: Glass, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let radius = match kind {
-        Glass::Card => 14.0,
-        _ => RADIUS as f32,
-    };
-    let inner = glass_frame(kind).show(ui, add);
-    paint_sheen(ui.painter(), inner.response.rect, radius);
-    inner.inner
+pub fn surface<R>(ui: &mut egui::Ui, kind: Surface, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    surface_frame(kind).show(ui, add).inner
 }
 
-/// Like [`glass`], but stretches the surface over the whole available area.
-pub fn glass_fill<R>(ui: &mut egui::Ui, kind: Glass, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    glass(ui, kind, |ui| {
+/// Like [`surface`], but fills the whole available area.
+pub fn surface_fill<R>(
+    ui: &mut egui::Ui,
+    kind: Surface,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    surface(ui, kind, |ui| {
         ui.set_min_size(ui.available_size());
         add(ui)
     })
 }
 
-/// Bright top edge plus a faint vertical sheen, mimicking light caught by glass.
-fn paint_sheen(painter: &egui::Painter, rect: Rect, radius: f32) {
-    let top = rect.top() + 0.75;
-    painter.line_segment(
-        [
-            Pos2::new(rect.left() + radius, top),
-            Pos2::new(rect.right() - radius, top),
-        ],
-        Stroke::new(1.0, Color32::from_white_alpha(60)),
-    );
-
-    let sheen = Rect::from_min_max(
-        Pos2::new(rect.left() + 1.0, rect.top() + radius * 0.5),
-        Pos2::new(
-            rect.right() - 1.0,
-            rect.top() + (rect.height() * 0.35).min(120.0),
-        ),
-    );
-    if sheen.height() > 4.0 {
-        let mut mesh = epaint::Mesh::default();
-        let a = Color32::from_white_alpha(8);
-        let b = Color32::TRANSPARENT;
-        mesh.colored_vertex(sheen.left_top(), a);
-        mesh.colored_vertex(sheen.right_top(), a);
-        mesh.colored_vertex(sheen.right_bottom(), b);
-        mesh.colored_vertex(sheen.left_bottom(), b);
-        mesh.add_triangle(0, 1, 2);
-        mesh.add_triangle(0, 2, 3);
-        painter.add(mesh);
-    }
-}
-
-/// Filled accent "pill" button.
+/// Filled button. Light fills get dark text, dark fills white text.
 pub fn accent_button(text: &str, color: Color32, enabled: bool) -> egui::Button<'static> {
-    let fill = if enabled {
-        color
+    let (fill, text_color) = if enabled {
+        let luminance =
+            0.299 * color.r() as f32 + 0.587 * color.g() as f32 + 0.114 * color.b() as f32;
+        let text = if luminance > 150.0 {
+            Color32::BLACK
+        } else {
+            Color32::WHITE
+        };
+        (color, text)
     } else {
-        Color32::from_white_alpha(18)
+        (
+            Color32::from_white_alpha(12),
+            Color32::from_white_alpha(110),
+        )
     };
     egui::Button::new(
         egui::RichText::new(text.to_string())
-            .color(Color32::WHITE)
+            .color(text_color)
             .strong(),
     )
     .fill(fill)
     .stroke(Stroke::new(
         1.0,
-        Color32::from_white_alpha(if enabled { 80 } else { 24 }),
+        Color32::from_white_alpha(if enabled { 30 } else { 12 }),
     ))
-    .corner_radius(14)
+    .corner_radius(4)
 }
