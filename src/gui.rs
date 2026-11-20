@@ -721,6 +721,12 @@ impl App {
             if let Some(path) = write_restore_log(&lines) {
                 out.send(Msg::Log(format!("Restore log saved to {}", path.display())));
             }
+            if let Ok(dir) = firmware::logs_dir() {
+                out.send(Msg::Log(format!(
+                    "Detailed idevicerestore log: {}\\restore_*.log",
+                    dir.display()
+                )));
+            }
             if let Err(e) = result {
                 return Err(match last_error_line(&lines) {
                     Some(line) => format!("{line} ({e:#})"),

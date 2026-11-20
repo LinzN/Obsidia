@@ -348,6 +348,11 @@ pub fn restore_cmd(dev: &Device, ipsw: &Path, erase: bool, debug: bool) -> Resul
         cmd.arg("-d");
     }
     cmd.arg(ipsw);
+    // idevicerestore writes its own detailed log (restore_<ecid>_<time>.log)
+    // into the working directory, which must be writable.
+    if let Ok(dir) = crate::firmware::logs_dir() {
+        cmd.current_dir(dir);
+    }
     Ok(cmd)
 }
 
