@@ -1,0 +1,163 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows MSI
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Install libimobiledevice (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-libimobiledevice
+            mingw-w64-ucrt-x86_64-libirecovery
+            mingw-w64-ucrt-x86_64-idevicerestore
+            mingw-w64-ucrt-x86_64-ca-certificates
+
+      - name: Collect files
+        shell: msys2 {0}
+        run: |
+          set -e
+          mkdir -p dist/tools
+          cp target/release/obsidia.exe dist/
+          for exe in idevice_id ideviceinfo ideviceenterrecovery idevicebackup2 irecovery idevicerestore; do
+            # some packages ship the tool with a target prefix (x86_64-w64-mingw32-idevicerestore.exe)
+            path=$(find /ucrt64/bin -iname "$exe.exe" | head -n1)
+            [ -z "$path" ] && path=$(find /ucrt64/bin -iname "*-$exe.exe" | head -n1)
+            if [ -z "$path" ]; then echo "::error::$exe.exe not found"; exit 1; fi
+            cp "$path" "dist/tools/$exe.exe"
+            ldd "$path" | awk '{print $3}' | grep -i '^/ucrt64/' | while read -r dll; do
+              cp -n "$dll" dist/tools/ || true
+            done
+          done
+          cp /ucrt64/etc/ssl/certs/ca-bundle.crt dist/tools/curl-ca-bundle.crt
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force out | Out-Null
+          wix build packaging\windows\obsidia.wxs -arch x64 -ext WixToolset.UI.wixext `
+            -d "Version=$version" -d "Root=$PWD" -o "out\obsidia-$version-x64.msi"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/*.msi
+          if-no-files-found: error
+
+  linux:
+    name: Linux package
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      - name: Build .deb
+        run: cargo deb --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  macos:
+    name: macOS disk image
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Build .dmg
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          mkdir -p out
+          packaging/macos/build-dmg.sh target/release/obsidia "$version" "out/obsidia-$version-macos-arm64.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: out/*.dmg
+          if-no-files-found: error
+
+  # A release is published whenever the version in Cargo.toml changes on main
+  # (or a v* tag is pushed).
+  release:
+    name: Release
+    needs: [windows, linux, macos]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* ]] || ! gh release view "$tag" >/dev/null 2>&1; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $tag already exists"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        if: steps.version.outputs.publish == 'true'
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        if: steps.version.outputs.publish == 'true'
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Obsidia ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          generate_release_notes: true

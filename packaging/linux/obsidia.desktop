@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Obsidia
+GenericName=iPhone & iPad Firmware Tool
+Comment=Flash, update and restore iPhone and iPad firmware
+Exec=obsidia
+Icon=obsidia
+Terminal=false
+Categories=Utility;System;
+Keywords=iPhone;iPad;iOS;firmware;restore;ipsw;

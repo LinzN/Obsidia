@@ -1,0 +1,46 @@
+[package]
+name = "obsidia"
+version = "0.3.0"
+edition = "2021"
+description = "Obsidia - iPhone/iPad firmware flashing tool for Windows, Linux and macOS"
+license = "MIT"
+authors = ["Niklas Linz <niklas.linz@mirranet.de>"]
+repository = "https://github.com/LinzN/obsidia"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+sha1 = "0.10"
+hex = "0.4"
+indicatif = "0.17"
+dirs = "5"
+eframe = "0.37"
+egui_extras = "0.37"
+rfd = "0.18"
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+strip = true
+lto = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
+[package.metadata.deb]
+maintainer = "Niklas Linz <niklas.linz@mirranet.de>"
+copyright = "2026, Niklas Linz"
+section = "utils"
+priority = "optional"
+depends = "$auto, libimobiledevice-utils, irecovery, idevicerestore, usbmuxd"
+extended-description = "Flash, update and restore the firmware of iPhones and iPads."
+assets = [
+    ["target/release/obsidia", "usr/bin/", "755"],
+    ["packaging/linux/obsidia.desktop", "usr/share/applications/", "644"],
+    ["assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/obsidia.png", "644"],
+    ["assets/logo.svg", "usr/share/icons/hicolor/scalable/apps/obsidia.svg", "644"],
+    ["README.md", "usr/share/doc/obsidia/README.md", "644"],
+]

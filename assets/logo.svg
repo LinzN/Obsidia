@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Obsidia app icon: a faceted obsidian crystal on a graphite tile. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b3039"/>
+      <stop offset="1" stop-color="#0c0e12"/>
+    </linearGradient>
+    <linearGradient id="tileSheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#3d8bfd" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#3d8bfd" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="fTopL" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7d8aa0"/>
+      <stop offset="1" stop-color="#3c4454"/>
+    </linearGradient>
+    <linearGradient id="fTopR" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#465063"/>
+      <stop offset="1" stop-color="#2a303b"/>
+    </linearGradient>
+    <linearGradient id="fMidL" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#323947"/>
+      <stop offset="1" stop-color="#1d2129"/>
+    </linearGradient>
+    <linearGradient id="fMidR" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#20252e"/>
+      <stop offset="1" stop-color="#14171d"/>
+    </linearGradient>
+    <linearGradient id="fBotL" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a1e25"/>
+      <stop offset="1" stop-color="#0f1115"/>
+    </linearGradient>
+    <linearGradient id="fBotR" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#121419"/>
+      <stop offset="1" stop-color="#08090c"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9cc8ff"/>
+      <stop offset="1" stop-color="#3d8bfd" stop-opacity="0.15"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#tile)"/>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#tileSheen)"/>
+  <rect x="16.75" y="16.75" width="478.5" height="478.5" rx="107.25" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="1.5"/>
+
+  <!-- Soft blue glow behind the crystal -->
+  <circle cx="256" cy="262" r="190" fill="url(#glow)"/>
+
+  <!-- Crystal facets: T(256,92) L1(148,172) R1(364,172) L2(168,344) R2(344,344) B(256,424) C(244,236) -->
+  <g stroke="#ffffff" stroke-opacity="0.16" stroke-width="2" stroke-linejoin="round">
+    <polygon points="256,92 148,172 244,236" fill="url(#fTopL)"/>
+    <polygon points="256,92 364,172 244,236" fill="url(#fTopR)"/>
+    <polygon points="148,172 168,344 244,236" fill="url(#fMidL)"/>
+    <polygon points="364,172 344,344 244,236" fill="url(#fMidR)"/>
+    <polygon points="168,344 256,424 244,236" fill="url(#fBotL)"/>
+    <polygon points="344,344 256,424 244,236" fill="url(#fBotR)"/>
+  </g>
+
+  <!-- Blue rim light along the upper left edges -->
+  <polyline points="168,344 148,172 256,92 364,172" fill="none" stroke="url(#rim)" stroke-width="4"
+            stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Glint -->
+  <g transform="translate(206,140)" fill="#ffffff">
+    <path d="M0,-18 L3,-3 L18,0 L3,3 L0,18 L-3,3 L-18,0 L-3,-3 Z" opacity="0.9"/>
+  </g>
+</svg>
