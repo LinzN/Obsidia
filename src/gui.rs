@@ -137,6 +137,36 @@ enum UpdateState {
     Failed(Option<Update>, String),
 }
 
+struct DfuAssistant {
+    family: Family,
+    state: DfuState,
+}
+
+enum DfuState {
+    Ready,
+    Countdown(Instant),
+    Running {
+        phase: usize,
+        since: Instant,
+    },
+    /// All steps done, waiting a moment for the device to show up.
+    Waiting(Instant),
+    Success,
+    Failed(String),
+}
+
+impl DfuAssistant {
+    fn active(&self) -> bool {
+        matches!(
+            self.state,
+            DfuState::Countdown(_) | DfuState::Running { .. } | DfuState::Waiting(_)
+        )
+    }
+}
+
+const DFU_COUNTDOWN: f32 = 3.0;
+const DFU_GRACE: f32 = 5.0;
+
 #[derive(PartialEq, Clone, Copy)]
 enum LocalStatus {
     Signed,
@@ -208,6 +238,7 @@ struct App {
     settings: Settings,
     show_settings: bool,
     guide_family: Option<Family>,
+    dfu: Option<DfuAssistant>,
 }
 
 impl App {
@@ -251,6 +282,7 @@ impl App {
             settings: Settings::load(),
             show_settings: false,
             guide_family: None,
+            dfu: None,
         };
         if updater::auto_check_enabled() && app.settings.check_updates {
             app.check_for_updates(false);
@@ -532,7 +564,13 @@ impl App {
         if self.scanning || self.busy() || !self.missing_tools.is_empty() {
             return;
         }
-        if self.last_scan.is_some_and(|t| t.elapsed() < SCAN_INTERVAL) {
+        // poll every second while the DFU assistant is waiting for the device
+        let interval = if self.dfu.as_ref().is_some_and(|d| d.active()) {
+            Duration::from_secs(1)
+        } else {
+            SCAN_INTERVAL
+        };
+        if self.last_scan.is_some_and(|t| t.elapsed() < interval) {
             return;
         }
         self.scanning = true;
@@ -1289,6 +1327,272 @@ impl App {
         }
     }
 
+    fn open_dfu_assistant(&mut self, family: Option<Family>) {
+        let family = family
+            .or(self.guide_family)
+            .or_else(|| self.device().and_then(|d| Family::from_product(&d.product)))
+            .unwrap_or(Family::IPhoneModern);
+        self.dfu = Some(DfuAssistant {
+            family,
+            state: DfuState::Ready,
+        });
+    }
+
+    /// Advance the assistant's timeline and react to the detected device mode.
+    fn dfu_tick(&mut self) {
+        let dfu_found = self.devices.iter().any(|d| d.mode == Mode::Dfu);
+        let recovery_found = self.devices.iter().any(|d| d.mode == Mode::Recovery);
+        let normal_found = self.devices.iter().any(|d| d.mode == Mode::Normal);
+        let tools_ok = self.missing_tools.is_empty();
+        let Some(dfu) = &mut self.dfu else { return };
+
+        if dfu.active() && dfu_found {
+            dfu.state = DfuState::Success;
+            self.log("DFU assistant: device is in DFU mode");
+            return;
+        }
+        let timeline = dfu.family.dfu_timeline();
+        match dfu.state {
+            DfuState::Countdown(since) if since.elapsed().as_secs_f32() >= DFU_COUNTDOWN => {
+                dfu.state = DfuState::Running {
+                    phase: 0,
+                    since: Instant::now(),
+                };
+            }
+            DfuState::Running { phase, since }
+                if since.elapsed().as_secs_f32() >= timeline[phase].secs =>
+            {
+                dfu.state = if phase + 1 < timeline.len() {
+                    DfuState::Running {
+                        phase: phase + 1,
+                        since: Instant::now(),
+                    }
+                } else {
+                    DfuState::Waiting(Instant::now())
+                };
+            }
+            DfuState::Waiting(since) if since.elapsed().as_secs_f32() >= DFU_GRACE => {
+                let reason = if recovery_found {
+                    "The device is in recovery mode instead. The button was probably held too long \
+                     in the first step, or released too late. Try again and follow the timer closely."
+                } else if normal_found {
+                    "The device restarted normally (Apple logo). Start again and keep holding the \
+                     second button until the timer ends."
+                } else if tools_ok {
+                    "No device detected. If the screen is black, the device may be in DFU mode but \
+                     not visible: check the cable and, on Windows, that Apple's drivers (Apple \
+                     Devices app or iTunes) are installed."
+                } else {
+                    "Device detection is not available because required tools are missing."
+                };
+                dfu.state = DfuState::Failed(reason.to_string());
+                self.log("DFU assistant: DFU mode not detected");
+            }
+            _ => {}
+        }
+    }
+
+    fn dfu_window(&mut self, ctx: &egui::Context) {
+        if self.dfu.is_none() {
+            return;
+        }
+        self.dfu_tick();
+        if self.dfu.as_ref().is_some_and(|d| d.active()) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
+        let detected = self.device().map(|d| d.mode.clone());
+        let device_family = self.device().and_then(|d| Family::from_product(&d.product));
+        let mut open = true;
+        let mut action: Option<&str> = None;
+        let Some(dfu) = &mut self.dfu else { return };
+        let timeline = dfu.family.dfu_timeline();
+
+        egui::Window::new("DFU assistant")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.set_width(520.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Device:").weak());
+                    if matches!(dfu.state, DfuState::Ready | DfuState::Failed(_)) {
+                        egui::ComboBox::from_id_salt("dfu_family")
+                            .selected_text(dfu.family.label())
+                            .width(320.0)
+                            .show_ui(ui, |ui| {
+                                for f in Family::ALL {
+                                    let label = if Some(f) == device_family {
+                                        format!("{} (connected)", f.label())
+                                    } else {
+                                        f.label().to_string()
+                                    };
+                                    ui.selectable_value(&mut dfu.family, f, label);
+                                }
+                            });
+                    } else {
+                        ui.label(dfu.family.label());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Detected:").weak());
+                    match &detected {
+                        Some(mode) => mode_badge(ui, mode),
+                        None => {
+                            ui.label(RichText::new("no device").weak());
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                match &dfu.state {
+                    DfuState::Ready => {
+                        ui.add(
+                            egui::Label::new(
+                                "Connect the device with a USB cable. After pressing Start, do exactly \
+                                 what the assistant shows, when the timer tells you to.",
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("The device turns off during the process - that is expected.")
+                                .weak()
+                                .small(),
+                        );
+                        ui.add_space(12.0);
+                        steps_overview(ui, timeline, None);
+                        ui.add_space(12.0);
+                        if ui
+                            .add(
+                                theme::accent_button("▶  Start", ACCENT, true)
+                                    .min_size(egui::vec2(140.0, 34.0)),
+                            )
+                            .clicked()
+                        {
+                            action = Some("start");
+                        }
+                    }
+                    DfuState::Countdown(since) => {
+                        let left = (DFU_COUNTDOWN - since.elapsed().as_secs_f32()).max(0.0).ceil();
+                        big_step(ui, "Get ready ...", None, left, 1.0 - left / DFU_COUNTDOWN);
+                        ui.add_space(12.0);
+                        steps_overview(ui, timeline, None);
+                    }
+                    DfuState::Running { phase, since } => {
+                        let p = &timeline[*phase];
+                        let elapsed = since.elapsed().as_secs_f32();
+                        let left = (p.secs - elapsed).max(0.0).ceil();
+                        ui.label(
+                            RichText::new(format!("Step {} of {}", phase + 1, timeline.len())).weak(),
+                        );
+                        big_step(ui, p.text, p.hint, left, (elapsed / p.secs).min(1.0));
+                        ui.add_space(12.0);
+                        steps_overview(ui, timeline, Some(*phase));
+                    }
+                    DfuState::Waiting(_) => {
+                        big_step(
+                            ui,
+                            "Release all buttons",
+                            Some("Checking for the device ..."),
+                            0.0,
+                            1.0,
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Waiting for the device ...");
+                        });
+                    }
+                    DfuState::Success => {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("✔").color(GREEN).size(28.0));
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("DFU mode detected").size(18.0).strong());
+                                ui.label("You can release the button. The device is ready to be flashed.");
+                            });
+                        });
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(theme::accent_button("⚡  Go to Smart Flash", ACCENT, true))
+                                .clicked()
+                            {
+                                action = Some("flash");
+                            }
+                            if ui.button("Close").clicked() {
+                                action = Some("close");
+                            }
+                        });
+                    }
+                    DfuState::Failed(reason) => {
+                        ui.horizontal_top(|ui| {
+                            ui.label(RichText::new("✖").color(RED).size(24.0));
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("DFU mode not detected").size(17.0).strong());
+                                ui.add(egui::Label::new(reason.as_str()).wrap());
+                            });
+                        });
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(theme::accent_button("↻  Try again", ACCENT, true))
+                                .clicked()
+                            {
+                                action = Some("start");
+                            }
+                            if ui.button("Show written guide").clicked() {
+                                action = Some("guide");
+                            }
+                            if ui.button("Close").clicked() {
+                                action = Some("close");
+                            }
+                        });
+                    }
+                }
+
+                if dfu.active() {
+                    ui.add_space(10.0);
+                    if ui.button("Cancel").clicked() {
+                        action = Some("close");
+                    }
+                }
+            });
+
+        match action {
+            Some("start") => {
+                if detected == Some(Mode::Dfu) {
+                    dfu.state = DfuState::Success;
+                } else {
+                    dfu.state = DfuState::Countdown(Instant::now());
+                    self.last_scan = None;
+                }
+            }
+            Some("flash") => {
+                self.dfu = None;
+                self.tab = Tab::Flash;
+                self.page = FlashPage::SmartFlash;
+            }
+            Some("guide") => {
+                let family = dfu.family;
+                self.dfu = None;
+                self.guide_family = Some(family);
+                self.tab = Tab::Flash;
+                self.page = FlashPage::Guide;
+            }
+            Some("close") => self.dfu = None,
+            _ => {}
+        }
+        if !open {
+            self.dfu = None;
+        }
+    }
+
     fn guide_page(&mut self, ui: &mut egui::Ui) {
         page_title(
             ui,
@@ -1302,6 +1606,16 @@ impl App {
             .unwrap_or(Family::IPhoneModern);
 
         ui.horizontal(|ui| {
+            if ui
+                .add(theme::accent_button("▶  Start DFU assistant", ACCENT, true))
+                .on_hover_text(
+                    "Guides you through the button sequence with a timer and detects DFU mode",
+                )
+                .clicked()
+            {
+                self.open_dfu_assistant(Some(family));
+            }
+            ui.add_space(12.0);
             ui.label("Device:");
             egui::ComboBox::from_id_salt("guide_family")
                 .selected_text(family.label())
@@ -1863,9 +2177,9 @@ impl App {
                         close = true;
                     }
                     ui.add_space(6.0);
-                    if ui.button("How to enter DFU mode").clicked() {
+                    if ui.button("Enter DFU mode (assistant)").clicked() {
                         close = true;
-                        self.page = FlashPage::Guide;
+                        self.open_dfu_assistant(None);
                     }
                 }
                 (None, None) => close = true,
@@ -2189,6 +2503,9 @@ impl App {
                 self.update_dismissed = false;
                 self.check_for_updates(true);
             }
+            if tool_tile(ui, "▶", "DFU Assistant", "Timed guide into DFU mode", true) {
+                self.open_dfu_assistant(None);
+            }
             if tool_tile(ui, "📖", "Recovery & DFU", "Step-by-step guides", true) {
                 self.tab = Tab::Flash;
                 self.page = FlashPage::Guide;
@@ -2422,6 +2739,7 @@ impl eframe::App for App {
         self.log_window(&ctx);
         self.release_notes_window(&ctx);
         self.settings_window(&ctx);
+        self.dfu_window(&ctx);
         self.flash_dialog(&ctx);
     }
 }
@@ -2728,5 +3046,58 @@ fn steps(ui: &mut egui::Ui, steps: &[&str]) {
             ui.add(egui::Label::new(*step).wrap());
         });
         ui.add_space(4.0);
+    }
+}
+
+/// Large instruction with countdown for the DFU assistant.
+fn big_step(ui: &mut egui::Ui, text: &str, hint: Option<&str>, seconds_left: f32, progress: f32) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(430.0);
+            ui.add(egui::Label::new(RichText::new(text).size(20.0).strong()).wrap());
+            if let Some(h) = hint {
+                ui.label(RichText::new(h).weak());
+            }
+        });
+        if seconds_left > 0.0 {
+            ui.label(
+                RichText::new(format!("{seconds_left:.0}"))
+                    .size(40.0)
+                    .strong()
+                    .color(ACCENT),
+            );
+        }
+    });
+    ui.add_space(6.0);
+    ui.add(
+        egui::ProgressBar::new(progress.clamp(0.0, 1.0))
+            .desired_height(6.0)
+            .fill(ACCENT),
+    );
+}
+
+/// Compact list of all assistant steps; the current one is highlighted.
+fn steps_overview(ui: &mut egui::Ui, timeline: &[crate::guides::Phase], current: Option<usize>) {
+    for (i, phase) in timeline.iter().enumerate() {
+        let (marker, color) = match current {
+            Some(c) if i < c => ("✔", GREEN),
+            Some(c) if i == c => ("▶", ACCENT),
+            _ => ("•", Color32::from_gray(140)),
+        };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(marker).color(color));
+            let duration = if phase.secs < 3.0 {
+                "quick".to_string()
+            } else {
+                format!("{:.0} s", phase.secs)
+            };
+            let text = format!("{}  ({duration})", phase.text);
+            let text = if current == Some(i) {
+                RichText::new(text).strong()
+            } else {
+                RichText::new(text).weak()
+            };
+            ui.label(text);
+        });
     }
 }

@@ -133,6 +133,53 @@ impl Family {
         }
     }
 
+    /// Timed button sequence used by the DFU assistant.
+    pub fn dfu_timeline(self) -> &'static [Phase] {
+        const IPHONE_MODERN: &[Phase] = &[
+            Phase::new("Press and quickly release Volume Up", 1.5),
+            Phase::new("Press and quickly release Volume Down", 1.5),
+            Phase::new("Press and hold the Side button", 10.0)
+                .hint("Keep holding - the screen turns black."),
+            Phase::new("Keep holding Side and also hold Volume Down", 5.0),
+            Phase::new("Release Side - keep holding Volume Down", 10.0)
+                .hint("The screen stays black in DFU mode."),
+        ];
+        const IPHONE_7: &[Phase] = &[
+            Phase::new("Press and hold Side + Volume Down", 8.0),
+            Phase::new("Release Side - keep holding Volume Down", 10.0)
+                .hint("The screen stays black in DFU mode."),
+        ];
+        const IPHONE_HOME: &[Phase] = &[
+            Phase::new("Press and hold Home + Side (or Top)", 8.0),
+            Phase::new("Release Side - keep holding Home", 10.0)
+                .hint("The screen stays black in DFU mode."),
+        ];
+        const IPAD_NO_HOME: &[Phase] = &[
+            Phase::new(
+                "Press and quickly release the volume button nearest the top button",
+                1.5,
+            ),
+            Phase::new("Press and quickly release the other volume button", 1.5),
+            Phase::new("Press and hold the Top button", 10.0)
+                .hint("Keep holding - the screen turns black."),
+            Phase::new("Keep holding Top and also hold Volume Down", 5.0),
+            Phase::new("Release Top - keep holding Volume Down", 10.0)
+                .hint("The screen stays black in DFU mode."),
+        ];
+        const IPAD_HOME: &[Phase] = &[
+            Phase::new("Press and hold Home + Top", 8.0),
+            Phase::new("Release Top - keep holding Home", 10.0)
+                .hint("The screen stays black in DFU mode."),
+        ];
+        match self {
+            Family::IPhoneModern => IPHONE_MODERN,
+            Family::IPhone7 => IPHONE_7,
+            Family::IPhoneHome => IPHONE_HOME,
+            Family::IPadNoHome => IPAD_NO_HOME,
+            Family::IPadHome => IPAD_HOME,
+        }
+    }
+
     pub fn force_restart(self) -> &'static str {
         match self {
             Family::IPhoneModern => {
@@ -151,6 +198,28 @@ impl Family {
                 "Hold the Home button and the top button together until the Apple logo appears."
             }
         }
+    }
+}
+
+/// One step of the DFU assistant.
+pub struct Phase {
+    pub text: &'static str,
+    pub hint: Option<&'static str>,
+    pub secs: f32,
+}
+
+impl Phase {
+    const fn new(text: &'static str, secs: f32) -> Self {
+        Self {
+            text,
+            hint: None,
+            secs,
+        }
+    }
+
+    const fn hint(mut self, hint: &'static str) -> Self {
+        self.hint = Some(hint);
+        self
     }
 }
 

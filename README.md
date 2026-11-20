@@ -32,6 +32,7 @@ from [ipsw.me](https://ipsw.me).
 - Drag & drop a local `.ipsw` onto the window to flash it
 - Downloaded firmware is reused while Apple signs it; optional auto-clean removes expired files
 - Step-by-step guides for recovery and DFU mode for every iPhone and iPad generation
+- DFU assistant: a timer walks you through the button sequence and detects DFU mode live
 - Backup, enter / exit recovery mode
 - Live log with progress of every operation
 
