@@ -55,11 +55,97 @@ fn latest_release_url() -> String {
         .unwrap_or_else(|_| format!("https://api.github.com/repos/{REPO}/releases/latest"))
 }
 
+/// False if updates are turned off by the administrator: environment variable
+/// `OBSIDIA_NO_UPDATE_CHECK=1` or, on Windows, the policy value
+/// `HKLM\Software\Policies\MirraNET\Obsidia\DisableUpdates = 1`.
 pub fn auto_check_enabled() -> bool {
-    !matches!(
+    let env_off = matches!(
         std::env::var("OBSIDIA_NO_UPDATE_CHECK").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
-    )
+    );
+    !env_off && !disabled_by_policy()
+}
+
+fn disabled_by_policy() -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("reg");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.args([
+        "query",
+        r"HKLM\Software\Policies\MirraNET\Obsidia",
+        "/v",
+        "DisableUpdates",
+    ])
+    .stderr(std::process::Stdio::null())
+    .output()
+    .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("0x1"))
+    .unwrap_or(false)
+}
+
+/// Whether this user can install an update. The Windows MSI installs for all
+/// users and needs administrator rights; standard users can't elevate.
+pub fn can_install() -> bool {
+    #[cfg(windows)]
+    {
+        windows_can_elevate()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::device::command_exists("pkexec")
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        true
+    }
+}
+
+#[cfg(windows)]
+fn windows_can_elevate() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenElevation, TokenElevationType, TOKEN_ELEVATION,
+        TOKEN_ELEVATION_TYPE, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // SAFETY: plain Win32 token queries with correctly sized out buffers.
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return true; // unknown - let the installer decide
+        }
+        let mut kind: TOKEN_ELEVATION_TYPE = 0;
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevationType,
+            &mut kind as *mut _ as *mut _,
+            std::mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+            &mut len,
+        );
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let ok2 = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut _,
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        if ok == 0 || ok2 == 0 {
+            return true;
+        }
+        // 2 = full (elevated), 3 = limited admin token that can elevate,
+        // 1 = default: standard user unless already elevated (UAC off)
+        kind == 2 || kind == 3 || elevation.TokenIsElevated != 0
+    }
 }
 
 /// Returns the latest release if it is newer than the running version.

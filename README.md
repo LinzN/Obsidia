@@ -91,8 +91,17 @@ offers to download and install it (the installer is verified against the release
 `SHA256SUMS`). You can also check manually under *Toolbox > Updates* or with
 `obsidia update`.
 
-Set `OBSIDIA_NO_UPDATE_CHECK=1` to disable the check, e.g. when updates are rolled out
-centrally. `OBSIDIA_UPDATE_URL` points the updater to a different release endpoint.
+The check can be turned off in the settings. In managed environments administrators can
+disable it for everyone, e.g. via Group Policy / registry:
+
+```
+HKEY_LOCAL_MACHINE\Software\Policies\MirraNET\Obsidia
+    DisableUpdates (DWORD) = 1
+```
+
+or with the environment variable `OBSIDIA_NO_UPDATE_CHECK=1`. Users without administrator
+rights are told about new versions but are not offered the installer.
+`OBSIDIA_UPDATE_URL` points the updater to a different release endpoint.
 
 ## Tool lookup
 

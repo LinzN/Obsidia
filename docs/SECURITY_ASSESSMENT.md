@@ -151,8 +151,12 @@ Firewall allow list: `api.ipsw.me`, `*.cdn-apple.com`, `gs.apple.com` (TCP 443),
   closes itself. Linux: `pkexec apt-get install`. macOS: the disk image is opened.
 - The checksum file comes from the same release as the installer. It protects against
   corrupted downloads, but not against a compromised GitHub account (see R11).
-- **Company control:** set `OBSIDIA_NO_UPDATE_CHECK=1` (system environment variable) to
-  disable the automatic check and roll out updates through software distribution instead.
+- **Company control:** set the policy value
+  `HKLM\Software\Policies\MirraNET\Obsidia\DisableUpdates = 1` (DWORD, deployable via Group
+  Policy) or the system environment variable `OBSIDIA_NO_UPDATE_CHECK=1` to disable the
+  check and roll out updates through software distribution instead. Users can also turn
+  the check off in the settings. Users without administrator rights are informed about
+  new versions but are not offered the installer.
   `OBSIDIA_UPDATE_URL` can point to an internal, GitHub-compatible release endpoint.
   Standard users cannot install the per-machine MSI without administrator rights.
 
@@ -263,7 +267,7 @@ Use this checklist in the software approval process.
 
 **Operation**
 - [ ] Owner for updates assigned; new releases reviewed before rollout
-- [ ] Decision on the built-in updater: allowed, or disabled via `OBSIDIA_NO_UPDATE_CHECK=1` and updates distributed centrally
+- [ ] Decision on the built-in updater: allowed, or disabled via policy (`DisableUpdates`) and updates distributed centrally
 - [ ] Process for reporting security issues (GitHub issues / maintainer contact)
 
 ---

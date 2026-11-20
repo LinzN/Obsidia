@@ -851,12 +851,16 @@ impl App {
                         {
                             action = Some("dismiss");
                         }
-                        let can_install = update.asset.is_some() && !busy;
+                        let can_install = update.asset.is_some() && !busy && updater::can_install();
                         let resp = ui.add_enabled(
                             can_install,
                             theme::accent_button("Install update", ACCENT, can_install),
                         );
-                        let resp = if busy {
+                        let resp = if !updater::can_install() {
+                            resp.on_disabled_hover_text(
+                                "Installing updates needs administrator rights - ask your IT administrator",
+                            )
+                        } else if busy {
                             resp.on_disabled_hover_text(
                                 "Wait until the current operation has finished",
                             )
@@ -1179,25 +1183,76 @@ impl App {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(UpdateState::Available(u)) = &self.update {
-                    let text = RichText::new(format!("Update {} available", u.version))
-                        .small()
-                        .color(ACCENT);
-                    if ui.add(egui::Button::new(text).frame(false)).clicked() {
-                        self.update_dismissed = false;
-                    }
-                    ui.separator();
-                }
-                ui.label(
-                    RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                        .small()
-                        .weak(),
-                );
-                ui.separator();
                 if ui.small_button("View log").clicked() {
                     self.show_log = !self.show_log;
                 }
             });
+        });
+    }
+
+    /// Version and update state shown under the project card.
+    fn version_status(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("Version {}", updater::CURRENT_VERSION)).small());
+            ui.label(RichText::new("·").small().weak());
+            match &self.update {
+                Some(UpdateState::Checking) => {
+                    ui.label(RichText::new("Checking for updates ...").small().weak());
+                }
+                Some(UpdateState::UpToDate) => {
+                    ui.label(
+                        RichText::new(format!("{} Up to date", "\u{e182}"))
+                            .small()
+                            .color(GREEN),
+                    );
+                }
+                Some(UpdateState::Available(u))
+                | Some(UpdateState::Downloading { update: u, .. }) => {
+                    let text = RichText::new(format!("Update {} available", u.version))
+                        .small()
+                        .color(ACCENT);
+                    if ui
+                        .add(egui::Label::new(text).sense(egui::Sense::click()))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Show update")
+                        .clicked()
+                    {
+                        self.update_dismissed = false;
+                    }
+                }
+                Some(UpdateState::Failed(..)) => {
+                    if ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new("Update check failed").small().color(ORANGE),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Click to try again")
+                        .clicked()
+                    {
+                        self.check_for_updates(true);
+                    }
+                }
+                None => {
+                    let text = if updater::auto_check_enabled() {
+                        "Check for updates"
+                    } else {
+                        "Updates managed by IT"
+                    };
+                    if ui
+                        .add(
+                            egui::Label::new(RichText::new(text).small().weak())
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Check now")
+                        .clicked()
+                    {
+                        self.check_for_updates(true);
+                    }
+                }
+            }
         });
     }
 
@@ -1250,12 +1305,14 @@ impl App {
         }
 
         // keep the project card at the bottom of the sidebar
-        const CARD_HEIGHT: f32 = 150.0;
+        const CARD_HEIGHT: f32 = 190.0;
         let free = ui.available_height() - CARD_HEIGHT;
         if free > 0.0 {
             ui.add_space(free);
         }
         project_card(ui);
+        ui.add_space(6.0);
+        self.version_status(ui);
     }
 
     fn smart_flash_page(&mut self, ui: &mut egui::Ui) {
@@ -1947,9 +2004,18 @@ impl App {
                 changed |= ui
                     .checkbox(&mut self.settings.check_updates, "Check for updates on start-up")
                     .changed();
+                if !updater::can_install() {
+                    ui.label(
+                        RichText::new(
+                            "Installing updates needs administrator rights. You will still be told about new versions.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
                 if !updater::auto_check_enabled() {
                     ui.label(
-                        RichText::new("Disabled by your administrator (OBSIDIA_NO_UPDATE_CHECK).")
+                        RichText::new("Disabled by your administrator (policy or OBSIDIA_NO_UPDATE_CHECK).")
                             .color(ORANGE)
                             .small(),
                     );

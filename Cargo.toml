@@ -32,7 +32,7 @@ strip = true
 lto = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_System_Power"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_Power", "Win32_System_Threading"] }
 
 [package.metadata.deb]
 maintainer = "Niklas Linz <niklas.linz@mirranet.de>"
