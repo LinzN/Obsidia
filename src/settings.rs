@@ -11,6 +11,10 @@ pub struct Settings {
     pub auto_clean: bool,
     /// Look for a new Obsidia version on start-up.
     pub check_updates: bool,
+    /// Retry a failed restore automatically once the device is back.
+    pub auto_retry: bool,
+    /// Custom firmware folder; `None` = Documents/Obsidia/Firmware.
+    pub firmware_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Settings {
@@ -18,6 +22,8 @@ impl Default for Settings {
         Self {
             auto_clean: false,
             check_updates: true,
+            auto_retry: true,
+            firmware_dir: None,
         }
     }
 }

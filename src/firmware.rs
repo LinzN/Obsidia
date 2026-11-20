@@ -132,8 +132,37 @@ pub fn data_dir() -> PathBuf {
         .join("Obsidia")
 }
 
+static CUSTOM_FIRMWARE_DIR: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Use a different firmware folder (from the settings); `None` resets it.
+pub fn set_firmware_dir(dir: Option<PathBuf>) {
+    if let Ok(mut d) = CUSTOM_FIRMWARE_DIR.write() {
+        *d = dir;
+    }
+}
+
+pub fn default_firmware_dir() -> PathBuf {
+    data_dir().join("Firmware")
+}
+
+/// True if the path is inside a OneDrive folder (synced to the cloud).
+pub fn is_cloud_synced(path: &Path) -> bool {
+    path.components().any(|c| {
+        c.as_os_str()
+            .to_string_lossy()
+            .to_lowercase()
+            .starts_with("onedrive")
+    })
+}
+
+/// Free space on the drive holding `path`.
+pub fn free_space(path: &Path) -> Option<u64> {
+    fs2::available_space(path).ok()
+}
+
 pub fn firmware_dir() -> Result<PathBuf> {
-    let dir = data_dir().join("Firmware");
+    let custom = CUSTOM_FIRMWARE_DIR.read().ok().and_then(|d| d.clone());
+    let dir = custom.unwrap_or_else(default_firmware_dir);
     fs::create_dir_all(&dir)?;
     migrate_old_cache(&dir);
     Ok(dir)

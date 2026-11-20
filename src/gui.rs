@@ -244,6 +244,8 @@ struct App {
 impl App {
     fn new(ctx: &egui::Context) -> Self {
         theme::apply(ctx);
+        let settings = Settings::load();
+        firmware::set_firmware_dir(settings.firmware_dir.clone());
         let (tx, rx) = channel();
         let mut app = Self {
             logo: load_logo(ctx),
@@ -279,7 +281,7 @@ impl App {
             update: None,
             update_dismissed: false,
             show_release_notes: false,
-            settings: Settings::load(),
+            settings,
             show_settings: false,
             guide_family: None,
             dfu: None,
@@ -674,6 +676,7 @@ impl App {
             label: label.clone(),
             result: None,
         });
+        let auto_retry = self.settings.auto_retry;
         self.tab = Tab::Flash;
         self.page = FlashPage::SmartFlash;
         self.start_job(JobKind::Flash, &title, move |out| {
@@ -706,34 +709,79 @@ impl App {
                     .map_err(|e| format!("{e:#}"))?
                 }
             };
-            out.send(Msg::JobStatus("Preparing device ...".into()));
-            let cmd =
-                device::restore_cmd(&dev, &ipsw, erase, false).map_err(|e| format!("{e:#}"))?;
-            let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-            let (line_out, collected) = (out.clone(), lines.clone());
-            let result = device::run_streaming(cmd, move |l| {
-                if let Ok(mut v) = collected.lock() {
-                    v.push(l.clone());
+            // Keep the computer awake until the restore is finished.
+            let _awake = device::KeepAwake::new();
+            preflight(&ipsw).map_err(|e| e.to_string())?;
+
+            let attempts = if auto_retry { MAX_RESTORE_ATTEMPTS } else { 1 };
+            let mut dev = dev;
+            let mut attempt = 1;
+            loop {
+                if attempt > 1 {
+                    out.send(Msg::Log(format!("--- Attempt {attempt} of {attempts} ---")));
                 }
-                line_out.send(Msg::Log(l));
-            });
-            let lines = lines.lock().map(|v| v.clone()).unwrap_or_default();
-            if let Some(path) = write_restore_log(&lines) {
-                out.send(Msg::Log(format!("Restore log saved to {}", path.display())));
-            }
-            if let Ok(dir) = firmware::logs_dir() {
-                out.send(Msg::Log(format!(
-                    "Detailed idevicerestore log: {}\\restore_*.log",
-                    dir.display()
-                )));
-            }
-            if let Err(e) = result {
-                return Err(match last_error_line(&lines) {
-                    Some(line) => format!("{line} ({e:#})"),
-                    None => format!("{e:#} - tip: put the device into DFU mode and try again"),
+                out.send(Msg::JobStatus(if attempt > 1 {
+                    format!("Preparing device (attempt {attempt} of {attempts}) ...")
+                } else {
+                    "Preparing device ...".into()
+                }));
+                let cmd = device::restore_cmd(&dev, &ipsw, erase, false)
+                    .map_err(|e| format!("{e:#}"))?;
+                let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+                let (line_out, collected) = (out.clone(), lines.clone());
+                let result = device::run_streaming(cmd, move |l| {
+                    if let Ok(mut v) = collected.lock() {
+                        v.push(l.clone());
+                    }
+                    line_out.send(Msg::Log(l));
                 });
+                let lines = lines.lock().map(|v| v.clone()).unwrap_or_default();
+                if let Some(path) = write_restore_log(&lines) {
+                    out.send(Msg::Log(format!("Restore log saved to {}", path.display())));
+                }
+
+                let Err(e) = result else {
+                    return Ok(
+                        "Flashing completed successfully - the device will now reboot.".to_string(),
+                    );
+                };
+                let detail = match last_error_line(&lines) {
+                    Some(line) => format!("{line} ({e:#})"),
+                    None => format!("{e:#}"),
+                };
+                if attempt >= attempts || !retryable(&lines) || dev.ecid.is_empty() {
+                    return Err(if attempt > 1 {
+                        format!("{detail} - failed after {attempt} attempts")
+                    } else {
+                        detail
+                    });
+                }
+
+                // Typical failure: the connection to the device is lost when it
+                // switches into restore mode and it boots back. Wait until it is
+                // back and start over.
+                out.send(Msg::Log(format!(
+                    "Attempt {attempt} failed: {detail}. Waiting for the device to reconnect ..."
+                )));
+                out.send(Msg::JobStatus("Waiting for the device to reconnect ...".into()));
+                match device::wait_for_device(&dev.ecid, Duration::from_secs(180)) {
+                    Some(found) => {
+                        out.send(Msg::Log(format!(
+                            "Device is back in {} mode, retrying in a few seconds",
+                            found.mode
+                        )));
+                        dev = found;
+                        // give the device time to settle after reconnecting
+                        std::thread::sleep(Duration::from_secs(5));
+                    }
+                    None => {
+                        return Err(format!(
+                            "{detail} - the device did not reconnect. Put it into recovery or DFU mode and try again."
+                        ))
+                    }
+                }
+                attempt += 1;
             }
-            Ok("Flashing completed successfully - the device will now reboot.".to_string())
         });
     }
 
@@ -1715,6 +1763,55 @@ impl App {
                 );
                 ui.add_space(10.0);
 
+                ui.label(RichText::new("Restore").strong());
+                changed |= ui
+                    .checkbox(
+                        &mut self.settings.auto_retry,
+                        "Retry automatically if the connection is lost (up to 3 attempts)",
+                    )
+                    .changed();
+                ui.add_space(10.0);
+
+                ui.label(RichText::new("Firmware folder").strong());
+                let current = firmware::firmware_dir()
+                    .unwrap_or_else(|_| firmware::default_firmware_dir());
+                ui.label(RichText::new(current.display().to_string()).small());
+                if firmware::is_cloud_synced(&current) {
+                    ui.label(
+                        RichText::new(
+                            "⚠ This folder is synced with OneDrive. Firmware files are several GB and syncing \
+                             can lock files during a restore - a local folder is recommended.",
+                        )
+                        .color(ORANGE)
+                        .small(),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Change ...").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new()
+                            .set_title("Choose firmware folder")
+                            .set_directory(&current)
+                            .pick_folder()
+                        {
+                            self.settings.firmware_dir = Some(dir);
+                            changed = true;
+                        }
+                    }
+                    if self.settings.firmware_dir.is_some() && ui.button("Reset to default").clicked() {
+                        self.settings.firmware_dir = None;
+                        changed = true;
+                    }
+                    if ui.button("Open").clicked() {
+                        open_path(&current);
+                    }
+                });
+                ui.label(
+                    RichText::new("Existing files are not moved; copy them over if you want to keep them.")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(10.0);
+
                 ui.label(RichText::new("Updates").strong());
                 changed |= ui
                     .checkbox(&mut self.settings.check_updates, "Check for updates on start-up")
@@ -1736,7 +1833,6 @@ impl App {
                 let base = firmware::data_dir();
                 egui::Grid::new("folders").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
                     for (label, dir) in [
-                        ("Firmware", base.join("Firmware")),
                         ("Backups", base.join("Backups")),
                         ("Logs", base.join("Logs")),
                     ] {
@@ -1752,8 +1848,9 @@ impl App {
             });
         self.show_settings = open;
         if changed {
+            firmware::set_firmware_dir(self.settings.firmware_dir.clone());
             self.settings.save();
-            self.clean_pending = true;
+            self.refresh_local_files();
         }
     }
 
@@ -2617,6 +2714,24 @@ impl App {
                     ui.label(RichText::new("Apps and data are kept. A backup is still recommended.").weak());
                 }
                 ui.label(RichText::new("Do not disconnect the device until it has rebooted.").weak());
+                if let Some(b) = req.device.battery.filter(|b| *b < 20) {
+                    ui.label(
+                        RichText::new(format!(
+                            "⚠ Battery is at {b} %. Charge the device first for a reliable restore."
+                        ))
+                        .color(ORANGE),
+                    );
+                }
+                if firmware::firmware_dir().is_ok_and(|d| firmware::is_cloud_synced(&d)) {
+                    ui.label(
+                        RichText::new(
+                            "⚠ The firmware folder is synced with OneDrive. Pause OneDrive or choose a local \
+                             folder in the settings if the restore fails.",
+                        )
+                        .color(ORANGE)
+                        .small(),
+                    );
+                }
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
@@ -3131,4 +3246,47 @@ fn steps_overview(ui: &mut egui::Ui, timeline: &[crate::guides::Phase], current:
             ui.label(text);
         });
     }
+}
+
+const MAX_RESTORE_ATTEMPTS: u32 = 3;
+
+/// A retry only makes sense for connection problems, not if Apple refused to
+/// sign the firmware or the IPSW does not fit the device.
+fn retryable(lines: &[String]) -> bool {
+    let fatal = [
+        "TSS server returned",
+        "isn't eligible",
+        "not compatible",
+        "No matching build identity",
+        "checksum",
+        "Unable to open ipsw",
+    ];
+    !lines.iter().any(|l| fatal.iter().any(|f| l.contains(f)))
+}
+
+/// Checks before a restore so it doesn't fail halfway through.
+fn preflight(ipsw: &Path) -> anyhow::Result<()> {
+    if device::apple_service_running() == Some(false) {
+        anyhow::bail!(
+            "The Apple Mobile Device Service is not running. Install or repair the Apple Devices app \
+             (or iTunes), or start the service in services.msc."
+        );
+    }
+    // idevicerestore extracts the root filesystem next to the IPSW.
+    let size = std::fs::metadata(ipsw).map(|m| m.len()).unwrap_or(0);
+    let extracted = ipsw.with_extension("").is_dir();
+    if let (Some(dir), false) = (ipsw.parent(), extracted) {
+        if let Some(free) = firmware::free_space(dir) {
+            let needed = size + 1024 * 1024 * 1024;
+            if free < needed {
+                anyhow::bail!(
+                    "Not enough free disk space in {}: {} needed, {} available.",
+                    dir.display(),
+                    HumanBytes(needed),
+                    HumanBytes(free)
+                );
+            }
+        }
+    }
+    Ok(())
 }

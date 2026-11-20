@@ -416,3 +416,101 @@ pub fn run_streaming(
     }
     Ok(())
 }
+
+/// ECIDs come as decimal (lockdown) or hex (recovery / DFU); compare the value.
+pub fn parse_ecid(ecid: &str) -> Option<u64> {
+    let e = ecid.trim();
+    match e.strip_prefix("0x").or_else(|| e.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => e.parse().ok(),
+    }
+}
+
+pub fn same_device(a: &Device, ecid: &str) -> bool {
+    match (parse_ecid(&a.ecid), parse_ecid(ecid)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Wait until the device with `ecid` shows up again (any mode).
+pub fn wait_for_device(ecid: &str, timeout: std::time::Duration) -> Option<Device> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(devs) = all_devices() {
+            if let Some(d) = devs.into_iter().find(|d| same_device(d, ecid)) {
+                return Some(d);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    None
+}
+
+/// Windows only: is the Apple Mobile Device Service running? `None` if
+/// unknown or not applicable.
+pub fn apple_service_running() -> Option<bool> {
+    if !cfg!(windows) {
+        return None;
+    }
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("sc");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd
+        .args(["query", "Apple Mobile Device Service"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        return Some(false);
+    }
+    Some(text.contains("RUNNING"))
+}
+
+/// Keeps the computer from going to sleep while alive.
+pub struct KeepAwake;
+
+impl KeepAwake {
+    pub fn new() -> Self {
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Power::{
+                SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
+            };
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+        }
+        KeepAwake
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ecids() {
+        assert_eq!(parse_ecid("0x001319160286001e"), Some(0x1319160286001e));
+        assert_eq!(parse_ecid("5375606879813662"), Some(5375606879813662));
+        assert_eq!(
+            parse_ecid("0x001319160286001e"),
+            parse_ecid("5375606879813662")
+        );
+        assert_eq!(parse_ecid(""), None);
+    }
+}
