@@ -10,6 +10,7 @@ mod device;
 mod firmware;
 mod gui;
 mod guides;
+mod icons;
 mod settings;
 mod theme;
 mod updater;

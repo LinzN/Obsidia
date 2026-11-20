@@ -70,23 +70,34 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_visuals(v);
 }
 
-/// Use Segoe UI on Windows so the app matches the system look.
+/// Fonts: Segoe UI on Windows (matches the system look) and the Phosphor
+/// icon font as a fallback for icons.
 fn load_system_font(ctx: &egui::Context) {
-    if !cfg!(windows) {
-        return;
-    }
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-    let Ok(bytes) = std::fs::read(format!("{windir}\\Fonts\\segoeui.ttf")) else {
-        return;
-    };
-
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "segoe-ui".into(),
-        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-    );
-    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        family.insert(0, "segoe-ui".into());
+
+    if cfg!(windows) {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        if let Ok(bytes) = std::fs::read(format!("{windir}\\Fonts\\segoeui.ttf")) {
+            fonts.font_data.insert(
+                "segoe-ui".into(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.insert(0, "segoe-ui".into());
+            }
+        }
+    }
+
+    let mut icons = egui::FontData::from_static(crate::icons::FONT);
+    // Phosphor glyphs sit a bit high next to text
+    icons.tweak.y_offset_factor = 0.08;
+    fonts
+        .font_data
+        .insert("phosphor".into(), std::sync::Arc::new(icons));
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        if let Some(f) = fonts.families.get_mut(&family) {
+            f.push("phosphor".into());
+        }
     }
     ctx.set_fonts(fonts);
 }

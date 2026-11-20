@@ -3,6 +3,7 @@
 use crate::device::{self, Device, Mode};
 use crate::firmware::{self, CatalogEntry, DeviceInfo, Firmware, Progress};
 use crate::guides::Family;
+use crate::icons;
 use crate::settings::Settings;
 use crate::theme::{self, Surface, ACCENT, DANGER, GREEN, ORANGE, RED};
 use crate::updater::{self, Update};
@@ -237,6 +238,7 @@ struct App {
 
     settings: Settings,
     show_settings: bool,
+    show_about: bool,
     guide_family: Option<Family>,
     dfu: Option<DfuAssistant>,
 }
@@ -283,6 +285,7 @@ impl App {
             show_release_notes: false,
             settings,
             show_settings: false,
+            show_about: false,
             guide_family: None,
             dfu: None,
         };
@@ -833,7 +836,7 @@ impl App {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| match &self.update {
                 Some(UpdateState::Available(update)) => {
-                    ui.label(RichText::new("ⓘ").color(ACCENT).size(16.0));
+                    ui.label(RichText::new("\u{e2ce}").color(ACCENT).size(16.0));
                     ui.label(RichText::new("Update available").strong());
                     ui.label(format!(
                         "Obsidia {} is available (you have {}).",
@@ -841,7 +844,11 @@ impl App {
                         updater::CURRENT_VERSION
                     ));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("✖").on_hover_text("Dismiss").clicked() {
+                        if ui
+                            .small_button("\u{e4f6}")
+                            .on_hover_text("Dismiss")
+                            .clicked()
+                        {
                             action = Some("dismiss");
                         }
                         let can_install = update.asset.is_some() && !busy;
@@ -891,10 +898,10 @@ impl App {
                     });
                 }
                 Some(UpdateState::Failed(_, e)) => {
-                    ui.label(RichText::new("⚠").color(ORANGE));
+                    ui.label(RichText::new("\u{e4e0}").color(ORANGE));
                     ui.label(RichText::new(format!("Update failed: {e}")).color(RED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("✖").clicked() {
+                        if ui.small_button("\u{e4f6}").clicked() {
                             action = Some("dismiss");
                         }
                         if ui.button("Open release page").clicked() {
@@ -1074,7 +1081,11 @@ impl App {
             if let Some(logo) = &self.logo {
                 ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(32.0, 32.0)));
             }
-            ui.label(RichText::new("Obsidia").size(21.0).strong());
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new("Obsidia").size(20.0).strong());
+                link(ui, "by MirraNET", MIRRANET_URL);
+            });
             ui.add_space(28.0);
 
             for (tab, label) in [
@@ -1089,17 +1100,39 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("⚙").on_hover_text("Settings").clicked() {
+                let github = egui::Button::new(
+                    RichText::new(format!("{}  Open source on GitHub", icons::GITHUB_LOGO))
+                        .strong(),
+                )
+                .fill(Color32::from_white_alpha(10))
+                .stroke(Stroke::new(1.0, ACCENT.gamma_multiply(0.5)))
+                .corner_radius(14);
+                if ui.add(github).on_hover_text(GITHUB_URL).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(GITHUB_URL));
+                }
+                ui.add_space(6.0);
+                if ui
+                    .button(icons::INFO)
+                    .on_hover_text("About Obsidia")
+                    .clicked()
+                {
+                    self.show_about = !self.show_about;
+                }
+                if ui.button(icons::GEAR).on_hover_text("Settings").clicked() {
                     self.show_settings = !self.show_settings;
                 }
-                if ui.button("☰ Log").on_hover_text("Show the log").clicked() {
+                if ui
+                    .button("\u{e2f2} Log")
+                    .on_hover_text("Show the log")
+                    .clicked()
+                {
                     self.show_log = !self.show_log;
                 }
                 let active = self.downloads.len();
                 let dl = if active > 0 {
-                    format!("⬇ {active}")
+                    format!("\u{e20c} {active}")
                 } else {
-                    "⬇".to_string()
+                    "\u{e20c}".to_string()
                 };
                 let resp = ui.button(dl).on_hover_text(if active > 0 {
                     format!("{active} download(s) running - open firmware folder")
@@ -1187,14 +1220,20 @@ impl App {
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         section_label(ui, "FLASH");
-        if nav_button(ui, "⚡  Smart Flash", self.page == FlashPage::SmartFlash).clicked() {
+        if nav_button(
+            ui,
+            "\u{e2de}  Smart Flash",
+            self.page == FlashPage::SmartFlash,
+        )
+        .clicked()
+        {
             self.page = FlashPage::SmartFlash;
         }
         ui.add_space(12.0);
         section_label(ui, "FIRMWARE");
         if nav_button(
             ui,
-            "⬇  Firmware Download",
+            "\u{e20c}  Firmware Download",
             self.page == FlashPage::FirmwareDownload,
         )
         .clicked()
@@ -1203,7 +1242,7 @@ impl App {
         }
         if nav_button(
             ui,
-            "🗀  Local Firmware",
+            "\u{e256}  Local Firmware",
             self.page == FlashPage::LocalFirmware,
         )
         .clicked()
@@ -1213,12 +1252,26 @@ impl App {
         }
         ui.add_space(12.0);
         section_label(ui, "TOOLS");
-        if nav_button(ui, "📖  Recovery & DFU", self.page == FlashPage::Guide).clicked() {
+        if nav_button(
+            ui,
+            "\u{e0e6}  Recovery & DFU",
+            self.page == FlashPage::Guide,
+        )
+        .clicked()
+        {
             self.page = FlashPage::Guide;
         }
-        if nav_button(ui, "🧰  Toolbox", false).clicked() {
+        if nav_button(ui, "\u{eca0}  Toolbox", false).clicked() {
             self.tab = Tab::Toolbox;
         }
+
+        // keep the project card at the bottom of the sidebar
+        const CARD_HEIGHT: f32 = 150.0;
+        let free = ui.available_height() - CARD_HEIGHT;
+        if free > 0.0 {
+            ui.add_space(free);
+        }
+        project_card(ui);
     }
 
     fn smart_flash_page(&mut self, ui: &mut egui::Ui) {
@@ -1233,15 +1286,15 @@ impl App {
             "Pick a firmware, choose your options on the right and press Flash.",
         );
         ui.horizontal(|ui| {
-            if ui.button("⤓ Import Local Firmware").clicked() {
+            if ui.button("\u{e61e} Import Local Firmware").clicked() {
                 self.import_local_firmware();
             }
-            if ui.button("🗀 Open Folder").clicked() {
+            if ui.button("\u{e256} Open Folder").clicked() {
                 if let Ok(dir) = firmware::firmware_dir() {
                     open_path(&dir);
                 }
             }
-            if ui.button("⟳ Refresh").clicked() {
+            if ui.button("\u{e036} Refresh").clicked() {
                 if let Some(p) = self.device_product() {
                     self.firmwares.remove(&p);
                 }
@@ -1255,11 +1308,11 @@ impl App {
             theme::surface(ui, Surface::Card, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("◉").color(ACCENT));
+                    ui.label(RichText::new("\u{eb08}").color(ACCENT));
                     ui.label(RichText::new("Local firmware:").weak());
                     ui.label(RichText::new(file_name(&path)).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("✖ Remove").clicked() {
+                        if ui.small_button("\u{e4f6} Remove").clicked() {
                             self.selection = None;
                         }
                     });
@@ -1271,7 +1324,7 @@ impl App {
         let Some(product) = self.device_product() else {
             empty_state(
                 ui,
-                "📱",
+                "\u{e1e0}",
                 "No device connected",
                 &format!(
                     "Connect an iPhone or iPad via USB and {}.",
@@ -1311,7 +1364,7 @@ impl App {
                     self.ensure_catalog();
                     if self.device().is_some()
                         && ui
-                            .selectable_label(self.browse.is_none(), "📱 Connected device")
+                            .selectable_label(self.browse.is_none(), "\u{e1e0} Connected device")
                             .clicked()
                     {
                         self.browse = None;
@@ -1373,7 +1426,7 @@ impl App {
             Some(p) => self.firmware_table(ui, &p, false),
             None => empty_state(
                 ui,
-                "⬇",
+                "\u{e20c}",
                 "Choose a model",
                 "Select an iPhone or iPad model above.",
                 None,
@@ -1524,7 +1577,7 @@ impl App {
                         ui.add_space(12.0);
                         if ui
                             .add(
-                                theme::accent_button("▶  Start", ACCENT, true)
+                                theme::accent_button("\u{e3d0}  Start", ACCENT, true)
                                     .min_size(egui::vec2(140.0, 34.0)),
                             )
                             .clicked()
@@ -1565,7 +1618,7 @@ impl App {
                     }
                     DfuState::Success => {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("✔").color(GREEN).size(28.0));
+                            ui.label(RichText::new("\u{e182}").color(GREEN).size(28.0));
                             ui.vertical(|ui| {
                                 ui.label(RichText::new("DFU mode detected").size(18.0).strong());
                                 ui.label("You can release the button. The device is ready to be flashed.");
@@ -1574,7 +1627,7 @@ impl App {
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             if ui
-                                .add(theme::accent_button("⚡  Go to Smart Flash", ACCENT, true))
+                                .add(theme::accent_button("\u{e2de}  Go to Smart Flash", ACCENT, true))
                                 .clicked()
                             {
                                 action = Some("flash");
@@ -1586,7 +1639,7 @@ impl App {
                     }
                     DfuState::Failed(reason) => {
                         ui.horizontal_top(|ui| {
-                            ui.label(RichText::new("✖").color(RED).size(24.0));
+                            ui.label(RichText::new("\u{e4f6}").color(RED).size(24.0));
                             ui.vertical(|ui| {
                                 ui.label(RichText::new("DFU mode not detected").size(17.0).strong());
                                 ui.add(egui::Label::new(reason.as_str()).wrap());
@@ -1595,7 +1648,7 @@ impl App {
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             if ui
-                                .add(theme::accent_button("↻  Try again", ACCENT, true))
+                                .add(theme::accent_button("\u{e094}  Try again", ACCENT, true))
                                 .clicked()
                             {
                                 action = Some("start");
@@ -1661,7 +1714,11 @@ impl App {
 
         ui.horizontal(|ui| {
             if ui
-                .add(theme::accent_button("▶  Start DFU assistant", ACCENT, true))
+                .add(theme::accent_button(
+                    "\u{e3d0}  Start DFU assistant",
+                    ACCENT,
+                    true,
+                ))
                 .on_hover_text(
                     "Guides you through the button sequence with a timer and detects DFU mode",
                 )
@@ -1739,6 +1796,96 @@ impl App {
         });
     }
 
+    fn about_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_about;
+        egui::Window::new("About Obsidia")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(440.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    if let Some(logo) = &self.logo {
+                        ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(96.0, 96.0)));
+                    }
+                    ui.label(RichText::new("Obsidia").size(24.0).strong());
+                    ui.label(
+                        RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).weak(),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{}  Free and open-source software",
+                            icons::SEAL_CHECK
+                        ))
+                        .color(GREEN),
+                    );
+                    ui.label("An open-source project by the MirraNET organization.");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        // center the two buttons
+                        ui.add_space((ui.available_width() - 300.0).max(0.0) / 2.0);
+                        if ui
+                            .add(theme::accent_button(
+                                &format!("{}  Source code", icons::GITHUB_LOGO),
+                                ACCENT,
+                                true,
+                            ))
+                            .clicked()
+                        {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(GITHUB_URL));
+                        }
+                        if ui
+                            .button(format!("{}  mirranet.de", icons::GLOBE))
+                            .clicked()
+                        {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(MIRRANET_URL));
+                        }
+                    });
+                });
+                ui.add_space(12.0);
+                ui.separator();
+                egui::Grid::new("about")
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("License").weak());
+                        ui.label("MIT");
+                        ui.end_row();
+                        ui.label(RichText::new("Publisher").weak());
+                        link(ui, "MirraNET", MIRRANET_URL);
+                        ui.end_row();
+                        ui.label(RichText::new("Issues").weak());
+                        link(
+                            ui,
+                            "Report a problem on GitHub",
+                            &format!("{GITHUB_URL}/issues"),
+                        );
+                        ui.end_row();
+                        ui.label(RichText::new("Uses").weak());
+                        ui.vertical(|ui| {
+                            link(
+                                ui,
+                                "libimobiledevice (LGPL)",
+                                "https://libimobiledevice.org",
+                            );
+                            link(ui, "ipsw.me firmware data", "https://ipsw.me");
+                            link(ui, "Phosphor Icons (MIT)", "https://phosphoricons.com");
+                        });
+                        ui.end_row();
+                    });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Not affiliated with or endorsed by Apple Inc.")
+                        .weak()
+                        .small(),
+                );
+            });
+        self.show_about = open;
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         let mut changed = false;
@@ -1779,7 +1926,7 @@ impl App {
                 if firmware::is_cloud_synced(&current) {
                     ui.label(
                         RichText::new(
-                            "⚠ This folder is synced with OneDrive. Firmware files are several GB and syncing \
+                            "\u{e4e0} This folder is synced with OneDrive. Firmware files are several GB and syncing \
                              can lock files during a restore - a local folder is recommended.",
                         )
                         .color(ORANGE)
@@ -1861,15 +2008,15 @@ impl App {
             "Downloaded firmware is reused as long as Apple still signs it.",
         );
         ui.horizontal(|ui| {
-            if ui.button("⤓ Import Local Firmware").clicked() {
+            if ui.button("\u{e61e} Import Local Firmware").clicked() {
                 self.import_local_firmware();
             }
-            if ui.button("🗀 Open Folder").clicked() {
+            if ui.button("\u{e256} Open Folder").clicked() {
                 if let Ok(dir) = firmware::firmware_dir() {
                     open_path(&dir);
                 }
             }
-            if ui.button("⟳ Refresh").clicked() {
+            if ui.button("\u{e036} Refresh").clicked() {
                 self.refresh_local_files();
             }
             let expired = self
@@ -1880,7 +2027,7 @@ impl App {
             if ui
                 .add_enabled(
                     expired > 0 && !self.busy(),
-                    egui::Button::new(format!("🗑 Remove expired ({expired})")),
+                    egui::Button::new(format!("\u{e4a6} Remove expired ({expired})")),
                 )
                 .clicked()
             {
@@ -1901,7 +2048,7 @@ impl App {
         if self.local_files.is_empty() {
             empty_state(
                 ui,
-                "🗀",
+                "\u{e256}",
                 "No firmware downloaded yet",
                 &format!(
                     "Downloaded firmware is stored in {}.",
@@ -1954,7 +2101,7 @@ impl App {
                                 ui.label(RichText::new("● Signed").color(GREEN));
                             }
                             LocalStatus::Expired => {
-                                ui.label(RichText::new("○ Expired").color(RED))
+                                ui.label(RichText::new("\u{e18a} Expired").color(RED))
                                     .on_hover_text("Apple no longer signs this firmware");
                             }
                             LocalStatus::Checking => {
@@ -1974,7 +2121,7 @@ impl App {
                             {
                                 select = Some(file.path.clone());
                             }
-                            if ui.button("🗑 Delete").clicked() {
+                            if ui.button("\u{e4a6} Delete").clicked() {
                                 delete = Some(file.path.clone());
                             }
                         });
@@ -2077,9 +2224,9 @@ impl App {
                         if selectable {
                             row.col(|ui| {
                                 let (c, t) = if selected {
-                                    (ACCENT, "◉")
+                                    (ACCENT, "\u{eb08}")
                                 } else {
-                                    (Color32::GRAY, "○")
+                                    (Color32::GRAY, "\u{e18a}")
                                 };
                                 ui.label(RichText::new(t).color(c).size(16.0));
                             });
@@ -2103,7 +2250,7 @@ impl App {
                             if fw.signed {
                                 ui.label(RichText::new("● Signed").color(GREEN));
                             } else {
-                                ui.label(RichText::new("○ Not signed").weak());
+                                ui.label(RichText::new("\u{e18a} Not signed").weak());
                             }
                         });
                         row.col(|ui| {
@@ -2121,7 +2268,7 @@ impl App {
                                                 .show_percentage(),
                                         );
                                         if ui
-                                            .small_button("✖")
+                                            .small_button("\u{e4f6}")
                                             .on_hover_text("Cancel (can be resumed)")
                                             .clicked()
                                         {
@@ -2134,8 +2281,8 @@ impl App {
                                     }
                                 }
                             } else if fw.is_cached() {
-                                ui.label(RichText::new("✔ Downloaded").color(GREEN));
-                            } else if ui.button("⬇ Download").clicked() {
+                                ui.label(RichText::new("\u{e182} Downloaded").color(GREEN));
+                            } else if ui.button("\u{e20c} Download").clicked() {
                                 download = Some(fw.clone());
                             }
                         });
@@ -2190,7 +2337,7 @@ impl App {
                     ui.painter().text(
                         badge,
                         egui::Align2::CENTER_CENTER,
-                        "✔",
+                        "\u{e182}",
                         egui::FontId::proportional(24.0),
                         Color32::WHITE,
                     );
@@ -2200,7 +2347,7 @@ impl App {
                     ui.painter().text(
                         badge,
                         egui::Align2::CENTER_CENTER,
-                        "✖",
+                        "\u{e4f6}",
                         egui::FontId::proportional(22.0),
                         Color32::WHITE,
                     );
@@ -2403,7 +2550,7 @@ impl App {
             let label = if self.busy() {
                 "Flashing ..."
             } else {
-                "⚡  Flash"
+                "\u{e2de}  Flash"
             };
             let btn = theme::accent_button(
                 label,
@@ -2430,7 +2577,7 @@ impl App {
         let Some(dev) = self.device().cloned() else {
             empty_state(
                 ui,
-                "📱",
+                "\u{e1e0}",
                 "No device connected",
                 &format!(
                     "Connect an iPhone or iPad via USB and {}.",
@@ -2529,25 +2676,31 @@ impl App {
                     let busy = self.busy();
                     let normal = dev.mode == Mode::Normal;
                     if ui
-                        .add_enabled(!busy && normal, egui::Button::new("💾  Backup"))
+                        .add_enabled(!busy && normal, egui::Button::new("\u{e248}  Backup"))
                         .clicked()
                     {
                         self.start_backup(dev.clone());
                     }
                     if ui
-                        .add_enabled(!busy && normal, egui::Button::new("🔧  Enter recovery"))
+                        .add_enabled(
+                            !busy && normal,
+                            egui::Button::new("\u{e5d4}  Enter recovery"),
+                        )
                         .clicked()
                     {
                         self.start_enter_recovery(dev.clone());
                     }
                     if ui
-                        .add_enabled(!busy && !normal, egui::Button::new("↩  Exit recovery"))
+                        .add_enabled(
+                            !busy && !normal,
+                            egui::Button::new("\u{e08a}  Exit recovery"),
+                        )
                         .clicked()
                     {
                         self.start_exit_recovery();
                     }
                     if ui
-                        .add(theme::accent_button("⚡  Flash", ACCENT, true))
+                        .add(theme::accent_button("\u{e2de}  Flash", ACCENT, true))
                         .clicked()
                     {
                         self.tab = Tab::Flash;
@@ -2567,14 +2720,20 @@ impl App {
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(14.0, 14.0);
-            if tool_tile(ui, "💾", "Backup", "Back up apps and data", !busy && normal) {
+            if tool_tile(
+                ui,
+                "\u{e248}",
+                "Backup",
+                "Back up apps and data",
+                !busy && normal,
+            ) {
                 if let Some(d) = dev.clone() {
                     self.start_backup(d);
                 }
             }
             if tool_tile(
                 ui,
-                "🔧",
+                "\u{e5d4}",
                 "Enter Recovery",
                 "Boot into recovery mode",
                 !busy && normal,
@@ -2585,39 +2744,66 @@ impl App {
             }
             if tool_tile(
                 ui,
-                "↩",
+                "\u{e08a}",
                 "Exit Recovery",
                 "Reboot into iOS / iPadOS",
                 !busy && in_recovery,
             ) {
                 self.start_exit_recovery();
             }
-            if tool_tile(ui, "🗀", "Backups", "Open the backup folder", true) {
+            if tool_tile(ui, "\u{e256}", "Backups", "Open the backup folder", true) {
                 let dir = device::default_backup_dir();
                 let _ = std::fs::create_dir_all(&dir);
                 open_path(&dir);
             }
-            if tool_tile(ui, "⬇", "Firmware", "Open the firmware folder", true) {
+            if tool_tile(ui, "\u{e20c}", "Firmware", "Open the firmware folder", true) {
                 if let Ok(dir) = firmware::firmware_dir() {
                     open_path(&dir);
                 }
             }
-            if tool_tile(ui, "☰", "Log", "Show the activity log", true) {
+            if tool_tile(ui, "\u{e2f2}", "Log", "Show the activity log", true) {
                 self.show_log = true;
             }
             let checking = matches!(self.update, Some(UpdateState::Checking));
-            if tool_tile(ui, "⟳", "Updates", "Check for a new version", !checking) {
+            if tool_tile(
+                ui,
+                "\u{e036}",
+                "Updates",
+                "Check for a new version",
+                !checking,
+            ) {
                 self.update_dismissed = false;
                 self.check_for_updates(true);
             }
-            if tool_tile(ui, "▶", "DFU Assistant", "Timed guide into DFU mode", true) {
+            if tool_tile(
+                ui,
+                "\u{e3d0}",
+                "DFU Assistant",
+                "Timed guide into DFU mode",
+                true,
+            ) {
                 self.open_dfu_assistant(None);
             }
-            if tool_tile(ui, "📖", "Recovery & DFU", "Step-by-step guides", true) {
+            if tool_tile(
+                ui,
+                "\u{e0e6}",
+                "Recovery & DFU",
+                "Step-by-step guides",
+                true,
+            ) {
                 self.tab = Tab::Flash;
                 self.page = FlashPage::Guide;
             }
-            if tool_tile(ui, "⚙", "Settings", "Auto-clean, updates, folders", true) {
+            if tool_tile(ui, icons::INFO, "About", "Version, license, MirraNET", true) {
+                self.show_about = true;
+            }
+            if tool_tile(
+                ui,
+                "\u{e270}",
+                "Settings",
+                "Auto-clean, updates, folders",
+                true,
+            ) {
                 self.show_settings = true;
             }
         });
@@ -2635,7 +2821,7 @@ impl App {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
-                    RichText::new(format!("⚠ Required tools missing: {}", self.missing_tools.join(", ")))
+                    RichText::new(format!("\u{e4e0} Required tools missing: {}", self.missing_tools.join(", ")))
                         .strong()
                         .color(ORANGE),
                 );
@@ -2705,7 +2891,7 @@ impl App {
                 if req.erase {
                     ui.label(
                         RichText::new(
-                            "⚠ All data on the device will be deleted. Create a backup first and make sure you know \
+                            "\u{e4e0} All data on the device will be deleted. Create a backup first and make sure you know \
                              the Apple ID password (Activation Lock).",
                         )
                         .color(ORANGE),
@@ -2717,7 +2903,7 @@ impl App {
                 if let Some(b) = req.device.battery.filter(|b| *b < 20) {
                     ui.label(
                         RichText::new(format!(
-                            "⚠ Battery is at {b} %. Charge the device first for a reliable restore."
+                            "\u{e4e0} Battery is at {b} %. Charge the device first for a reliable restore."
                         ))
                         .color(ORANGE),
                     );
@@ -2725,7 +2911,7 @@ impl App {
                 if firmware::firmware_dir().is_ok_and(|d| firmware::is_cloud_synced(&d)) {
                     ui.label(
                         RichText::new(
-                            "⚠ The firmware folder is synced with OneDrive. Pause OneDrive or choose a local \
+                            "\u{e4e0} The firmware folder is synced with OneDrive. Pause OneDrive or choose a local \
                              folder in the settings if the restore fails.",
                         )
                         .color(ORANGE)
@@ -2865,6 +3051,7 @@ impl eframe::App for App {
         self.release_notes_window(&ctx);
         self.settings_window(&ctx);
         self.dfu_window(&ctx);
+        self.about_window(&ctx);
         self.flash_dialog(&ctx);
     }
 }
@@ -3226,8 +3413,8 @@ fn big_step(ui: &mut egui::Ui, text: &str, hint: Option<&str>, seconds_left: f32
 fn steps_overview(ui: &mut egui::Ui, timeline: &[crate::guides::Phase], current: Option<usize>) {
     for (i, phase) in timeline.iter().enumerate() {
         let (marker, color) = match current {
-            Some(c) if i < c => ("✔", GREEN),
-            Some(c) if i == c => ("▶", ACCENT),
+            Some(c) if i < c => ("\u{e182}", GREEN),
+            Some(c) if i == c => ("\u{e3d0}", ACCENT),
             _ => ("•", Color32::from_gray(140)),
         };
         ui.horizontal(|ui| {
@@ -3289,4 +3476,52 @@ fn preflight(ipsw: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Card at the bottom of the sidebar that marks Obsidia as a MirraNET
+/// open-source project.
+fn project_card(ui: &mut egui::Ui) {
+    theme::surface(ui, Surface::Card, |ui| {
+        ui.set_width(ui.available_width());
+        project_card_content(ui);
+    });
+}
+
+fn project_card_content(ui: &mut egui::Ui) {
+    {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(icons::SEAL_CHECK).color(GREEN).size(16.0));
+            ui.label(RichText::new("Open source").strong());
+        });
+        ui.add(
+            egui::Label::new(
+                RichText::new("Free software by the MirraNET organization, MIT licensed.")
+                    .small()
+                    .weak(),
+            )
+            .wrap(),
+        );
+        ui.add_space(6.0);
+        let width = ui.available_width();
+        if ui
+            .add(
+                egui::Button::new(format!("{}  View on GitHub", icons::GITHUB_LOGO))
+                    .min_size(egui::vec2(width, 28.0)),
+            )
+            .on_hover_text(GITHUB_URL)
+            .clicked()
+        {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(GITHUB_URL));
+        }
+        if ui
+            .add(
+                egui::Button::new(format!("{}  mirranet.de", icons::GLOBE))
+                    .min_size(egui::vec2(width, 28.0)),
+            )
+            .on_hover_text(MIRRANET_URL)
+            .clicked()
+        {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(MIRRANET_URL));
+        }
+    }
 }
