@@ -1,14 +1,19 @@
 //! Desktop GUI built with egui.
 
+mod device_pages;
+
 use crate::device::{self, Device, Mode};
 use crate::diagnostics::{self, Report};
 use crate::drivers;
 use crate::firmware::{self, CatalogEntry, DeviceInfo, Firmware, Progress};
 use crate::guides::Family;
+use crate::i18n::{tr, trf};
 use crate::icons;
+use crate::media;
 use crate::settings::Settings;
 use crate::theme::{self, Surface, ACCENT, DANGER, GREEN, ORANGE, RED};
 use crate::updater::{self, Update};
+use device_pages::DevicePage;
 use eframe::egui::{self, Color32, RichText, Stroke};
 use egui_extras::{Column, TableBuilder};
 use indicatif::HumanBytes;
@@ -70,6 +75,10 @@ enum Msg {
     DriverStatus(drivers::Status),
     LocalFirmwareChanged,
     Diagnostics(String, Result<Report, String>),
+    FindMy(String, Option<bool>),
+    Backups(Vec<crate::backup::BackupInfo>),
+    Encryption(String, Option<bool>),
+    Apps(String, Result<Vec<crate::apps::App>, String>),
 }
 
 /// Sender that also wakes up the UI.
@@ -122,6 +131,9 @@ struct FlashRequest {
     source: FlashSource,
     label: String,
     erase: bool,
+    /// Other connected devices the same firmware fits, and whether to
+    /// flash them as well (one after another).
+    others: Vec<(Device, bool)>,
 }
 
 /// Full-size progress / result view shown in place of the firmware list.
@@ -261,12 +273,26 @@ struct App {
     dfu: Option<DfuAssistant>,
     drivers: Option<DriverPanel>,
     diag: HashMap<String, DiagState>,
+    /// "Find My" state per device key (None while it is being read).
+    find_my: HashMap<String, Option<bool>>,
+    device_page: DevicePage,
+    backups: Option<Vec<crate::backup::BackupInfo>>,
+    backups_loading: bool,
+    backup_restore: Option<device_pages::RestoreDialog>,
+    confirm_delete_backup: Option<crate::backup::BackupInfo>,
+    encryption: HashMap<String, Option<bool>>,
+    enc_dialog: Option<device_pages::EncryptionDialog>,
+    apps: HashMap<String, device_pages::AppsState>,
+    apps_filter: String,
+    confirm_uninstall: Option<crate::apps::App>,
+    console: Option<device_pages::Console>,
 }
 
 impl App {
     fn new(ctx: &egui::Context) -> Self {
         theme::apply(ctx);
         let settings = Settings::load();
+        crate::i18n::set_language(&settings.language);
         firmware::set_firmware_dir(settings.firmware_dir.clone());
         let (tx, rx) = channel();
         let mut app = Self {
@@ -310,6 +336,18 @@ impl App {
             dfu: None,
             drivers: None,
             diag: HashMap::new(),
+            find_my: HashMap::new(),
+            device_page: DevicePage::Overview,
+            backups: None,
+            backups_loading: false,
+            backup_restore: None,
+            confirm_delete_backup: None,
+            encryption: HashMap::new(),
+            enc_dialog: None,
+            apps: HashMap::new(),
+            apps_filter: String::new(),
+            confirm_uninstall: None,
+            console: None,
         };
         if updater::auto_check_enabled() && app.settings.check_updates {
             app.check_for_updates(false);
@@ -436,7 +474,7 @@ impl App {
             return;
         }
         self.clean_pending = false;
-        self.remove_expired("Auto-clean");
+        self.remove_expired(tr("Auto-clean"));
     }
 
     fn process_messages(&mut self) {
@@ -490,8 +528,9 @@ impl App {
                             Load::Failed(e)
                         }
                     };
-                    self.firmwares.insert(product, state);
+                    self.firmwares.insert(product.clone(), state);
                     self.clean_pending = true;
+                    self.prefetch(&product);
                 }
                 Msg::DlProgress(url, p) => {
                     if let Some(d) = self.downloads.get_mut(&url) {
@@ -530,7 +569,7 @@ impl App {
                         }
                         Ok(None) => {
                             if manual {
-                                self.notice = Some(("Obsidia is up to date.".into(), false));
+                                self.notice = Some((tr("Obsidia is up to date.").into(), false));
                             }
                             UpdateState::UpToDate
                         }
@@ -544,6 +583,24 @@ impl App {
                     });
                 }
                 Msg::LocalFirmwareChanged => self.refresh_local_files(),
+                Msg::Backups(list) => {
+                    self.backups = Some(list);
+                    self.backups_loading = false;
+                }
+                Msg::Encryption(key, state) => {
+                    self.encryption.insert(key, state);
+                }
+                Msg::Apps(key, result) => {
+                    let state = self.apps.entry(key).or_insert(device_pages::AppsState {
+                        list: None,
+                        loading: false,
+                    });
+                    state.loading = false;
+                    state.list = Some(result);
+                }
+                Msg::FindMy(key, state) => {
+                    self.find_my.insert(key, state);
+                }
                 Msg::Diagnostics(key, result) => {
                     if let Some(state) = self.diag.get_mut(&key) {
                         state.loading = false;
@@ -604,6 +661,14 @@ impl App {
                         }
                     }
                     self.refresh_local_files();
+                    // lists may have changed (installed apps, new backups)
+                    self.apps.clear();
+                    self.encryption.clear();
+                    if self.device_page == DevicePage::Backups {
+                        self.load_backups();
+                    } else {
+                        self.backups = None;
+                    }
                     self.last_scan = None; // rescan right away
                 }
             }
@@ -655,6 +720,28 @@ impl App {
         }
     }
 
+    /// Starts downloading the newest signed firmware for `product` if the
+    /// setting is on and it is not on this computer yet.
+    fn prefetch(&mut self, product: &str) {
+        if !self.settings.auto_download || !self.devices.iter().any(|d| d.product == product) {
+            return;
+        }
+        let Some(Load::Ready(info)) = self.firmwares.get(product) else {
+            return;
+        };
+        let Some(fw) = info.firmwares.iter().find(|f| f.signed).cloned() else {
+            return;
+        };
+        let present = firmware::firmware_dir().is_ok_and(|d| d.join(fw.file_name()).is_file());
+        if !present && !self.downloads.contains_key(&fw.url) {
+            self.log(format!(
+                "Downloading {} {} in the background (automatic download)",
+                info.name, fw.version
+            ));
+            self.start_download(&fw);
+        }
+    }
+
     fn start_download(&mut self, fw: &Firmware) {
         if self.downloads.contains_key(&fw.url) {
             return;
@@ -697,7 +784,7 @@ impl App {
         self.job = Some(Job {
             kind,
             title: title.to_string(),
-            status: "Starting ...".into(),
+            status: tr("Starting ...").into(),
             percent: None,
             started: Instant::now(),
         });
@@ -715,7 +802,10 @@ impl App {
             source,
             label,
             erase,
+            others,
         } = req;
+        let mut targets = vec![dev];
+        targets.extend(others.into_iter().filter(|(_, on)| *on).map(|(d, _)| d));
         let title = if erase {
             format!("Restore to {label}")
         } else {
@@ -747,9 +837,9 @@ impl App {
                                     done as f64 * 100.0 / total as f64
                                 ),
                                 Progress::Downloading { .. } => {
-                                    "Downloading firmware ...".to_string()
+                                    tr("Downloading firmware ...").to_string()
                                 }
-                                Progress::Verifying => "Verifying firmware ...".to_string(),
+                                Progress::Verifying => tr("Verifying firmware ...").to_string(),
                             };
                             // The progress bar reads the percentage from the status line.
                             out.send(Msg::JobStatus(line));
@@ -762,114 +852,41 @@ impl App {
             let _awake = device::KeepAwake::new();
             preflight(&ipsw).map_err(|e| e.to_string())?;
 
-            let attempts = if auto_retry { MAX_RESTORE_ATTEMPTS } else { 1 };
-            let mut dev = dev;
-            let mut attempt = 1;
-            loop {
-                if attempt > 1 {
-                    out.send(Msg::Log(format!("--- Attempt {attempt} of {attempts} ---")));
-                }
-                out.send(Msg::JobStatus(if attempt > 1 {
-                    format!("Preparing device (attempt {attempt} of {attempts}) ...")
-                } else {
-                    "Preparing device ...".into()
-                }));
-                let cmd = device::restore_cmd(&dev, &ipsw, erase, false)
-                    .map_err(|e| format!("{e:#}"))?;
-                let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-                let (line_out, collected) = (out.clone(), lines.clone());
-                // no device queries while idevicerestore talks to the device
-                let lock = device::exclusive();
-                let result = device::run_streaming(cmd, move |l| {
-                    if let Ok(mut v) = collected.lock() {
-                        v.push(l.clone());
-                    }
-                    line_out.send(Msg::Log(l));
-                });
-                drop(lock);
-                let lines = lines.lock().map(|v| v.clone()).unwrap_or_default();
-                if let Some(path) = write_restore_log(&lines) {
-                    out.send(Msg::Log(format!("Restore log saved to {}", path.display())));
-                }
-
-                let Err(e) = result else {
-                    return Ok(
-                        "Flashing completed successfully - the device will now reboot.".to_string(),
-                    );
-                };
-                let detail = match last_error_line(&lines) {
-                    Some(line) => format!("{line} ({e:#})"),
-                    None => format!("{e:#}"),
-                };
-                let upload_failed = lines.iter().any(|l| l.contains("Unable to upload data"));
-                if attempt >= attempts || !retryable(&lines) || dev.ecid.is_empty() {
-                    let mut msg = if attempt > 1 {
-                        format!("{detail} - failed after {attempt} attempts")
-                    } else {
-                        detail
-                    };
-                    if upload_failed {
-                        msg.push_str(
-                            ". The device does not accept data over USB. Close the Apple Devices app / iTunes, \
-                             force restart the device into recovery or DFU mode, use a USB port directly on \
-                             the computer and try again.",
-                        );
-                        if drivers::supported() {
-                            msg.push_str(
-                                " Newer iPhones often need the classic iTunes drivers for this: \
-                                 Toolbox \u{2192} Apple Drivers installs them.",
-                            );
-                        }
-                    }
-                    return Err(msg);
-                }
-                if upload_failed {
-                    // A USB reset often clears a stuck recovery-mode connection.
-                    out.send(Msg::Log("Upload failed - resetting the USB connection".into()));
-                    let _lock = device::exclusive();
-                    device::reset_recovery_usb();
-                    std::thread::sleep(Duration::from_secs(3));
-                }
-
-                // Typical failure: the connection to the device is lost when it
-                // switches into restore mode and it boots back. Wait until it is
-                // back and start over.
+            let count = targets.len();
+            if count == 1 {
+                restore_device(targets.remove(0), &ipsw, erase, auto_retry, out, "")?;
+                return Ok(
+                    tr("Flashing completed successfully - the device will now reboot.").to_string(),
+                );
+            }
+            let mut failed = Vec::new();
+            for (i, dev) in targets.into_iter().enumerate() {
+                let name = format!(
+                    "{} {}",
+                    dev.kind(),
+                    dev.serial.clone().unwrap_or_else(|| dev.ecid.clone())
+                );
+                let prefix = trf("Device {} of {} ({}): ", &[&(i + 1), &count, &name]);
                 out.send(Msg::Log(format!(
-                    "Attempt {attempt} failed: {detail}. Waiting for the device to reconnect ..."
+                    "=== Device {} of {count}: {name} ===",
+                    i + 1
                 )));
-                out.send(Msg::JobStatus("Waiting for the device to reconnect ...".into()));
-                let mut found = device::wait_for_device(&dev.ecid, Duration::from_secs(60));
-                if found.is_none() {
-                    // A device that lost the connection in restore mode keeps
-                    // showing the progress bar and never comes back on its own.
-                    let steps = Family::from_product(&dev.product)
-                        .map(|f| f.recovery_steps().join(" "))
-                        .unwrap_or_else(|| "Force restart the device into recovery mode.".into());
-                    out.send(Msg::Log(format!(
-                        "The device did not come back by itself. Force restart it into recovery mode: {steps}"
-                    )));
-                    out.send(Msg::JobStatus(
-                        "Force restart the device into recovery mode - Obsidia continues automatically".into(),
-                    ));
-                    found = device::wait_for_device(&dev.ecid, Duration::from_secs(600));
+                if let Err(e) = restore_device(dev, &ipsw, erase, auto_retry, out, &prefix) {
+                    out.send(Msg::Log(format!("{name} failed: {e}")));
+                    failed.push(format!("{name}: {e}"));
                 }
-                match found {
-                    Some(found) => {
-                        out.send(Msg::Log(format!(
-                            "Device is back in {} mode, retrying in a few seconds",
-                            found.mode
-                        )));
-                        dev = found;
-                        // give the device time to settle after reconnecting
-                        std::thread::sleep(Duration::from_secs(5));
-                    }
-                    None => {
-                        return Err(format!(
-                            "{detail} - the device did not reconnect within 10 minutes. Put it into recovery or DFU mode and try again."
-                        ))
-                    }
-                }
-                attempt += 1;
+            }
+            if failed.is_empty() {
+                Ok(trf(
+                    "All {} devices were flashed successfully and will now reboot.",
+                    &[&count],
+                ))
+            } else {
+                Err(format!(
+                    "{} of {count} devices failed - {}",
+                    failed.len(),
+                    failed.join("; ")
+                ))
             }
         });
     }
@@ -926,7 +943,7 @@ impl App {
             ui.horizontal(|ui| match &self.update {
                 Some(UpdateState::Available(update)) => {
                     ui.label(RichText::new("\u{e2ce}").color(ACCENT).size(16.0));
-                    ui.label(RichText::new("Update available").strong());
+                    ui.label(RichText::new(tr("Update available")).strong());
                     ui.label(format!(
                         "Obsidia {} is available (you have {}).",
                         update.version,
@@ -935,7 +952,7 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button("\u{e4f6}")
-                            .on_hover_text("Dismiss")
+                            .on_hover_text(tr("Dismiss"))
                             .clicked()
                         {
                             action = Some("dismiss");
@@ -943,25 +960,25 @@ impl App {
                         let can_install = update.asset.is_some() && !busy && updater::can_install();
                         let resp = ui.add_enabled(
                             can_install,
-                            theme::accent_button("Install update", ACCENT, can_install),
+                            theme::accent_button(tr("Install update"), ACCENT, can_install),
                         );
                         let resp = if !updater::can_install() {
                             resp.on_disabled_hover_text(
-                                "Installing updates needs administrator rights - ask your IT administrator",
+                                tr("Installing updates needs administrator rights - ask your IT administrator"),
                             )
                         } else if busy {
                             resp.on_disabled_hover_text(
-                                "Wait until the current operation has finished",
+                                tr("Wait until the current operation has finished"),
                             )
                         } else {
                             resp.on_disabled_hover_text(
-                                "No installer for this platform in the release",
+                                tr("No installer for this platform in the release"),
                             )
                         };
                         if resp.clicked() {
                             action = Some("install");
                         }
-                        if ui.button("Release notes").clicked() {
+                        if ui.button(tr("Release notes")).clicked() {
                             action = Some("notes");
                         }
                     });
@@ -973,7 +990,7 @@ impl App {
                     ..
                 }) => {
                     ui.spinner();
-                    ui.label(format!("Downloading Obsidia {} ...", update.version));
+                    ui.label(trf("Downloading Obsidia {} ...", &[&update.version]));
                     let frac = if *total > 0 {
                         *done as f32 / *total as f32
                     } else {
@@ -985,7 +1002,7 @@ impl App {
                             .fill(ACCENT),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(tr("Cancel")).clicked() {
                             action = Some("cancel");
                         }
                     });
@@ -997,7 +1014,7 @@ impl App {
                         if ui.button("\u{e4f6}").clicked() {
                             action = Some("dismiss");
                         }
-                        if ui.button("Open release page").clicked() {
+                        if ui.button(tr("Open release page")).clicked() {
                             action = Some("page");
                         }
                     });
@@ -1047,7 +1064,7 @@ impl App {
         };
         let mut open = self.show_release_notes;
         let (title, notes, page) = (
-            format!("What's new in Obsidia {}", update.version),
+            trf("What's new in Obsidia {}", &[&update.version]),
             update.notes.clone(),
             update.page.clone(),
         );
@@ -1062,13 +1079,13 @@ impl App {
                     .max_height(300.0)
                     .show(ui, |ui| {
                         if notes.trim().is_empty() {
-                            ui.label(RichText::new("No release notes.").weak());
+                            ui.label(RichText::new(tr("No release notes.")).weak());
                         } else {
                             ui.label(&notes);
                         }
                     });
                 ui.add_space(8.0);
-                if ui.button("Open release page").clicked() {
+                if ui.button(tr("Open release page")).clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(page.clone()));
                 }
             });
@@ -1076,28 +1093,28 @@ impl App {
     }
 
     fn start_backup(&mut self, dev: Device) {
-        self.start_job(JobKind::Other, "Backup", move |out| {
+        self.start_job(JobKind::Other, tr("Backup"), move |out| {
             let dir = device::default_backup_dir();
             let cmd = device::backup_cmd(&dev, &dir).map_err(|e| format!("{e:#}"))?;
             let _lock = device::exclusive();
             let o = out.clone();
             device::run_streaming(cmd, move |l| o.send(Msg::Log(l)))
                 .map_err(|e| format!("{e:#}"))?;
-            Ok(format!("Backup stored in {}", dir.display()))
+            Ok(trf("Backup stored in {}", &[&dir.display()]))
         });
     }
 
     fn start_enter_recovery(&mut self, dev: Device) {
-        self.start_job(JobKind::Other, "Enter recovery", move |_| {
+        self.start_job(JobKind::Other, tr("Enter recovery"), move |_| {
             device::enter_recovery(&dev).map_err(|e| format!("{e:#}"))?;
-            Ok("Device is entering recovery mode.".into())
+            Ok(tr("Device is entering recovery mode.").into())
         });
     }
 
     fn start_exit_recovery(&mut self) {
-        self.start_job(JobKind::Other, "Exit recovery", |_| {
+        self.start_job(JobKind::Other, tr("Exit recovery"), |_| {
             device::exit_recovery().map_err(|e| format!("{e:#}"))?;
-            Ok("Reboot to normal mode requested.".into())
+            Ok(tr("Reboot to normal mode requested.").into())
         });
     }
 
@@ -1112,6 +1129,7 @@ impl App {
                 source: FlashSource::Local(path),
                 device: dev,
                 erase: self.erase,
+                others: Vec::new(),
             },
             Some(Selection::Firmware(url)) => {
                 let Some(fw) = self.find_firmware(&dev.product, &url) else {
@@ -1122,11 +1140,50 @@ impl App {
                     source: FlashSource::Firmware(fw),
                     device: dev,
                     erase: self.erase,
+                    others: Vec::new(),
                 }
             }
             None => return,
         };
+        let mut req = req;
+        req.others = self
+            .devices
+            .iter()
+            .filter(|d| d.key() != req.device.key() && self.fits(d, &req.source))
+            .map(|d| (d.clone(), false))
+            .collect();
+        for d in std::iter::once(&req.device).chain(req.others.iter().map(|(d, _)| d)) {
+            self.check_find_my(d);
+        }
         self.pending_flash = Some(req);
+    }
+
+    /// Whether the firmware of `source` can be installed on `dev`.
+    fn fits(&self, dev: &Device, source: &FlashSource) -> bool {
+        match source {
+            FlashSource::Firmware(fw) => self.find_firmware(&dev.product, &fw.url).is_some(),
+            // "iPhone15,2,iPhone15,3_27.2.1_24B156_Restore.ipsw"
+            FlashSource::Local(path) => {
+                dev.product != "?"
+                    && file_name(path).split('_').next().is_some_and(|ids| {
+                        ids.split(',')
+                            .collect::<Vec<_>>()
+                            .chunks(2)
+                            .any(|c| c.join(",") == dev.product)
+                    })
+            }
+        }
+    }
+
+    /// Reads the "Find My" state in the background for the flash dialog.
+    fn check_find_my(&mut self, dev: &Device) {
+        if dev.mode != Mode::Normal || self.find_my.contains_key(dev.key()) {
+            return;
+        }
+        let key = dev.key().to_string();
+        self.find_my.insert(key.clone(), None);
+        let dev = dev.clone();
+        self.spawn(move |out| out.send(Msg::FindMy(key, media::find_my_enabled(&dev))));
     }
 
     fn find_firmware(&self, product: &str, url: &str) -> Option<Firmware> {
@@ -1139,28 +1196,28 @@ impl App {
     /// Why the Flash button is disabled, or `None` if flashing is possible.
     fn flash_blocker(&self) -> Option<&'static str> {
         if !self.missing_tools.is_empty() {
-            return Some("Required tools are missing");
+            return Some(tr("Required tools are missing"));
         }
         if self.busy() {
-            return Some("Another operation is running");
+            return Some(tr("Another operation is running"));
         }
         let Some(dev) = self.device() else {
-            return Some("Connect a device first");
+            return Some(tr("Connect a device first"));
         };
         match &self.selection {
-            None => Some("Select a firmware first"),
+            None => Some(tr("Select a firmware first")),
             Some(Selection::Local(_)) => None,
             Some(Selection::Firmware(url)) => match self.find_firmware(&dev.product, url) {
                 Some(fw) if fw.signed => None,
-                Some(_) => Some("Apple no longer signs this version"),
-                None => Some("Select a firmware for the connected device"),
+                Some(_) => Some(tr("Apple no longer signs this version")),
+                None => Some(tr("Select a firmware for the connected device")),
             },
         }
     }
 
     fn import_local_firmware(&mut self) {
         let picked = rfd::FileDialog::new()
-            .set_title("Import local firmware")
+            .set_title(tr("Import local firmware"))
             .add_filter("iOS / iPadOS firmware", &["ipsw"])
             .pick_file();
         if let Some(path) = picked {
@@ -1178,14 +1235,14 @@ impl App {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(theme::title("Obsidia", 20.0));
-                link(ui, "by MirraNET", MIRRANET_URL);
+                link(ui, tr("by MirraNET"), MIRRANET_URL);
             });
             ui.add_space(28.0);
 
             for (tab, label) in [
-                (Tab::Device, "Device"),
-                (Tab::Flash, "Flash"),
-                (Tab::Toolbox, "Toolbox"),
+                (Tab::Device, tr("Device")),
+                (Tab::Flash, tr("Flash")),
+                (Tab::Toolbox, tr("Toolbox")),
             ] {
                 if tab_button(ui, label, self.tab == tab).clicked() {
                     self.tab = tab;
@@ -1194,13 +1251,13 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if header_button(ui, icons::INFO, "About Obsidia").clicked() {
+                if header_button(ui, icons::INFO, tr("About Obsidia")).clicked() {
                     self.show_about = !self.show_about;
                 }
-                if header_button(ui, icons::GEAR, "Settings").clicked() {
+                if header_button(ui, icons::GEAR, tr("Settings")).clicked() {
                     self.show_settings = !self.show_settings;
                 }
-                if header_button(ui, "\u{e2f2}", "Log").clicked() {
+                if header_button(ui, "\u{e2f2}", tr("Log")).clicked() {
                     self.show_log = !self.show_log;
                 }
                 let active = self.downloads.len();
@@ -1215,9 +1272,9 @@ impl App {
                             .min_size(egui::vec2(34.0, 32.0)),
                     )
                     .on_hover_text(if active > 0 {
-                        format!("{active} download(s) running - open firmware folder")
+                        trf("{} download(s) running - open firmware folder", &[&active])
                     } else {
-                        "Open the firmware folder".to_string()
+                        tr("Open the firmware folder").to_string()
                     });
                 if resp.clicked() {
                     if let Ok(dir) = firmware::firmware_dir() {
@@ -1234,17 +1291,17 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if self.missing_tools.is_empty() {
-                ui.label(RichText::new("● Tools ready").color(GREEN).small());
+                ui.label(RichText::new(tr("● Tools ready")).color(GREEN).small());
             } else {
-                ui.label(RichText::new("● Tools missing").color(ORANGE).small());
+                ui.label(RichText::new(tr("● Tools missing")).color(ORANGE).small());
             }
             ui.separator();
             let n = self.devices.len();
             ui.label(
                 RichText::new(match n {
-                    0 => "No device".to_string(),
-                    1 => "1 device connected".to_string(),
-                    n => format!("{n} devices connected"),
+                    0 => tr("No device").to_string(),
+                    1 => tr("1 device connected").to_string(),
+                    n => trf("{} devices connected", &[&n]),
                 })
                 .small(),
             );
@@ -1270,7 +1327,7 @@ impl App {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("View log").clicked() {
+                if ui.button(tr("View log")).clicked() {
                     self.show_log = !self.show_log;
                 }
             });
@@ -1281,33 +1338,33 @@ impl App {
     fn version_status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.label(RichText::new(format!("Version {}", updater::CURRENT_VERSION)).small());
+            ui.label(RichText::new(trf("Version {}", &[&updater::CURRENT_VERSION])).small());
             ui.label(RichText::new("·").small().weak());
             if updater::store_managed() {
                 ui.label(RichText::new("Microsoft Store").small().weak())
-                    .on_hover_text("Updates are installed by the Microsoft Store");
+                    .on_hover_text(tr("Updates are installed by the Microsoft Store"));
                 return;
             }
             match &self.update {
                 Some(UpdateState::Checking) => {
-                    ui.label(RichText::new("Checking for updates ...").small().weak());
+                    ui.label(RichText::new(tr("Checking for updates ...")).small().weak());
                 }
                 Some(UpdateState::UpToDate) => {
                     ui.label(
-                        RichText::new(format!("{} Up to date", "\u{e182}"))
+                        RichText::new(format!("\u{e182} {}", tr("Up to date")))
                             .small()
                             .color(GREEN),
                     );
                 }
                 Some(UpdateState::Available(u))
                 | Some(UpdateState::Downloading { update: u, .. }) => {
-                    let text = RichText::new(format!("Update {} available", u.version))
+                    let text = RichText::new(trf("Update {} available", &[&u.version]))
                         .small()
                         .color(ACCENT);
                     if ui
                         .add(egui::Label::new(text).sense(egui::Sense::click()))
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Show update")
+                        .on_hover_text(tr("Show update"))
                         .clicked()
                     {
                         self.update_dismissed = false;
@@ -1317,11 +1374,13 @@ impl App {
                     if ui
                         .add(
                             egui::Label::new(
-                                RichText::new("Update check failed").small().color(ORANGE),
+                                RichText::new(tr("Update check failed"))
+                                    .small()
+                                    .color(ORANGE),
                             )
                             .sense(egui::Sense::click()),
                         )
-                        .on_hover_text("Click to try again")
+                        .on_hover_text(tr("Click to try again"))
                         .clicked()
                     {
                         self.check_for_updates(true);
@@ -1329,16 +1388,16 @@ impl App {
                 }
                 None => {
                     let text = if updater::auto_check_enabled() {
-                        "Check for updates"
+                        tr("Check for updates")
                     } else {
-                        "Updates managed by IT"
+                        tr("Updates managed by IT")
                     };
                     if ui
                         .add(
                             egui::Label::new(RichText::new(text).small().weak())
                                 .sense(egui::Sense::click()),
                         )
-                        .on_hover_text("Check now")
+                        .on_hover_text(tr("Check now"))
                         .clicked()
                     {
                         self.check_for_updates(true);
@@ -1350,10 +1409,10 @@ impl App {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        section_label(ui, "FLASH");
+        section_label(ui, tr("FLASH"));
         if nav_button(
             ui,
-            "\u{e2de}  Smart Flash",
+            tr("\u{e2de}  Smart Flash"),
             self.page == FlashPage::SmartFlash,
         )
         .clicked()
@@ -1361,10 +1420,10 @@ impl App {
             self.page = FlashPage::SmartFlash;
         }
         ui.add_space(12.0);
-        section_label(ui, "FIRMWARE");
+        section_label(ui, tr("FIRMWARE"));
         if nav_button(
             ui,
-            "\u{e20c}  Firmware Download",
+            tr("\u{e20c}  Firmware Download"),
             self.page == FlashPage::FirmwareDownload,
         )
         .clicked()
@@ -1373,7 +1432,7 @@ impl App {
         }
         if nav_button(
             ui,
-            "\u{e256}  Local Firmware",
+            tr("\u{e256}  Local Firmware"),
             self.page == FlashPage::LocalFirmware,
         )
         .clicked()
@@ -1382,22 +1441,22 @@ impl App {
             self.refresh_local_files();
         }
         ui.add_space(12.0);
-        section_label(ui, "TOOLS");
+        section_label(ui, tr("TOOLS"));
         if nav_button(
             ui,
-            "\u{e0e6}  Recovery & DFU",
+            tr("\u{e0e6}  Recovery & DFU"),
             self.page == FlashPage::Guide,
         )
         .clicked()
         {
             self.page = FlashPage::Guide;
         }
-        if nav_button(ui, "\u{eca0}  Toolbox", false).clicked() {
+        if nav_button(ui, tr("\u{eca0}  Toolbox"), false).clicked() {
             self.tab = Tab::Toolbox;
         }
 
         // keep the project card at the bottom of the sidebar
-        const CARD_HEIGHT: f32 = 190.0;
+        const CARD_HEIGHT: f32 = 212.0;
         let free = ui.available_height() - CARD_HEIGHT;
         if free > 0.0 {
             ui.add_space(free);
@@ -1415,25 +1474,25 @@ impl App {
 
         page_title(
             ui,
-            "Smart Flash",
-            "Pick a firmware, choose your options on the right and press Flash.",
+            tr("Smart Flash"),
+            tr("Pick a firmware, choose your options on the right and press Flash."),
         );
         ui.horizontal(|ui| {
-            if ui.button("\u{e61e} Import Local Firmware").clicked() {
+            if ui.button(tr("\u{e61e} Import Local Firmware")).clicked() {
                 self.import_local_firmware();
             }
-            if ui.button("\u{e256} Open Folder").clicked() {
+            if ui.button(tr("\u{e256} Open Folder")).clicked() {
                 if let Ok(dir) = firmware::firmware_dir() {
                     open_path(&dir);
                 }
             }
-            if ui.button("\u{e036} Refresh").clicked() {
+            if ui.button(tr("\u{e036} Refresh")).clicked() {
                 if let Some(p) = self.device_product() {
                     self.firmwares.remove(&p);
                 }
                 self.last_scan = None;
             }
-            ui.checkbox(&mut self.show_unsigned, "Show unsigned");
+            ui.checkbox(&mut self.show_unsigned, tr("Show unsigned"));
         });
         ui.add_space(8.0);
 
@@ -1442,10 +1501,10 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("\u{eb08}").color(ACCENT));
-                    ui.label(RichText::new("Local firmware:").weak());
+                    ui.label(RichText::new(tr("Local firmware:")).weak());
                     ui.label(RichText::new(file_name(&path)).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("\u{e4f6} Remove").clicked() {
+                        if ui.button(tr("\u{e4f6} Remove")).clicked() {
                             self.selection = None;
                         }
                     });
@@ -1458,10 +1517,10 @@ impl App {
             empty_state(
                 ui,
                 "\u{e1e0}",
-                "No device connected",
-                &format!(
+                tr("No device connected"),
+                &trf(
                     "Connect an iPhone or iPad via USB and {}.",
-                    device::no_device_hint()
+                    &[&tr(device::no_device_hint())],
                 ),
                 self.scan_error.as_deref(),
             );
@@ -1473,8 +1532,8 @@ impl App {
     fn firmware_download_page(&mut self, ui: &mut egui::Ui) {
         page_title(
             ui,
-            "Firmware Download",
-            "Download firmware for any iPhone or iPad model.",
+            tr("Firmware Download"),
+            tr("Download firmware for any iPhone or iPad model."),
         );
         ui.horizontal(|ui| {
             let current = self
@@ -1485,9 +1544,12 @@ impl App {
             let label = match (&self.browse, &current) {
                 (Some(b), _) => format!("{} ({})", b.name, b.identifier),
                 (None, Some(p)) => {
-                    format!("{} ({p})", self.model_name(p).unwrap_or("Connected device"))
+                    format!(
+                        "{} ({p})",
+                        self.model_name(p).unwrap_or(tr("Connected device"))
+                    )
                 }
-                (None, None) => "Select a model ...".to_string(),
+                (None, None) => tr("Select a model ...").to_string(),
             };
             egui::ComboBox::from_id_salt("model_select")
                 .selected_text(label)
@@ -1497,14 +1559,17 @@ impl App {
                     self.ensure_catalog();
                     if self.device().is_some()
                         && ui
-                            .selectable_label(self.browse.is_none(), "\u{e1e0} Connected device")
+                            .selectable_label(
+                                self.browse.is_none(),
+                                tr("\u{e1e0} Connected device"),
+                            )
                             .clicked()
                     {
                         self.browse = None;
                     }
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
-                            .hint_text("Search model, e.g. iPad Pro"),
+                            .hint_text(tr("Search model, e.g. iPad Pro")),
                     );
                     ui.separator();
                     match &self.catalog {
@@ -1546,7 +1611,7 @@ impl App {
                         }
                     }
                 });
-            ui.checkbox(&mut self.show_unsigned, "Show unsigned");
+            ui.checkbox(&mut self.show_unsigned, tr("Show unsigned"));
         });
         ui.add_space(8.0);
 
@@ -1560,8 +1625,8 @@ impl App {
             None => empty_state(
                 ui,
                 "\u{e20c}",
-                "Choose a model",
-                "Select an iPhone or iPad model above.",
+                tr("Choose a model"),
+                tr("Select an iPhone or iPad model above."),
                 None,
             ),
         }
@@ -1613,17 +1678,17 @@ impl App {
             }
             DfuState::Waiting(since) if since.elapsed().as_secs_f32() >= DFU_GRACE => {
                 let reason = if recovery_found {
-                    "The device is in recovery mode instead. The button was probably held too long \
-                     in the first step, or released too late. Try again and follow the timer closely."
+                    tr("The device is in recovery mode instead. The button was probably held too long \
+                     in the first step, or released too late. Try again and follow the timer closely.")
                 } else if normal_found {
-                    "The device restarted normally (Apple logo). Start again and keep holding the \
-                     second button until the timer ends."
+                    tr("The device restarted normally (Apple logo). Start again and keep holding the \
+                     second button until the timer ends.")
                 } else if tools_ok {
-                    "No device detected. If the screen is black, the device may be in DFU mode but \
+                    tr("No device detected. If the screen is black, the device may be in DFU mode but \
                      not visible: check the cable and, on Windows, that Apple's drivers (Apple \
-                     Devices app or iTunes) are installed."
+                     Devices app or iTunes) are installed.")
                 } else {
-                    "Device detection is not available because required tools are missing."
+                    tr("Device detection is not available because required tools are missing.")
                 };
                 dfu.state = DfuState::Failed(reason.to_string());
                 self.log(format!("DFU assistant: DFU mode not detected - {reason}"));
@@ -1648,7 +1713,7 @@ impl App {
         let Some(dfu) = &mut self.dfu else { return };
         let timeline = dfu.family.dfu_timeline();
 
-        egui::Window::new("DFU assistant")
+        egui::Window::new(tr("DFU assistant"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1658,31 +1723,31 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(520.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Device:").weak());
+                    ui.label(RichText::new(tr("Device:")).weak());
                     if matches!(dfu.state, DfuState::Ready | DfuState::Failed(_)) {
                         egui::ComboBox::from_id_salt("dfu_family")
-                            .selected_text(dfu.family.label())
+                            .selected_text(tr(dfu.family.label()))
                             .width(320.0)
                             .show_ui(ui, |ui| {
                                 for f in Family::ALL {
                                     let label = if Some(f) == device_family {
-                                        format!("{} (connected)", f.label())
+                                        trf("{} (connected)", &[&tr(f.label())])
                                     } else {
-                                        f.label().to_string()
+                                        tr(f.label()).to_string()
                                     };
                                     ui.selectable_value(&mut dfu.family, f, label);
                                 }
                             });
                     } else {
-                        ui.label(dfu.family.label());
+                        ui.label(tr(dfu.family.label()));
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Detected:").weak());
+                    ui.label(RichText::new(tr("Detected:")).weak());
                     match &detected {
                         Some(mode) => mode_badge(ui, mode),
                         None => {
-                            ui.label(RichText::new("no device").weak());
+                            ui.label(RichText::new(tr("no device")).weak());
                         }
                     }
                 });
@@ -1694,14 +1759,14 @@ impl App {
                     DfuState::Ready => {
                         ui.add(
                             egui::Label::new(
-                                "Connect the device with a USB cable. After pressing Start, do exactly \
-                                 what the assistant shows, when the timer tells you to.",
+                                tr("Connect the device with a USB cable. After pressing Start, do exactly \
+                                 what the assistant shows, when the timer tells you to."),
                             )
                             .wrap(),
                         );
                         ui.add_space(4.0);
                         ui.label(
-                            RichText::new("The device turns off during the process - that is expected.")
+                            RichText::new(tr("The device turns off during the process - that is expected."))
                                 .weak()
                                 .small(),
                         );
@@ -1710,7 +1775,7 @@ impl App {
                         ui.add_space(12.0);
                         if ui
                             .add(
-                                theme::accent_button("\u{e3d0}  Start", ACCENT, true)
+                                theme::accent_button(tr("\u{e3d0}  Start"), ACCENT, true)
                                     .min_size(egui::vec2(140.0, 34.0)),
                             )
                             .clicked()
@@ -1720,7 +1785,7 @@ impl App {
                     }
                     DfuState::Countdown(since) => {
                         let left = (DFU_COUNTDOWN - since.elapsed().as_secs_f32()).max(0.0).ceil();
-                        big_step(ui, "Get ready ...", None, left, 1.0 - left / DFU_COUNTDOWN);
+                        big_step(ui, tr("Get ready ..."), None, left, 1.0 - left / DFU_COUNTDOWN);
                         ui.add_space(12.0);
                         steps_overview(ui, timeline, None);
                     }
@@ -1729,43 +1794,43 @@ impl App {
                         let elapsed = since.elapsed().as_secs_f32();
                         let left = (p.secs - elapsed).max(0.0).ceil();
                         ui.label(
-                            RichText::new(format!("Step {} of {}", phase + 1, timeline.len())).weak(),
+                            RichText::new(trf("Step {} of {}", &[&(phase + 1), &timeline.len()])).weak(),
                         );
-                        big_step(ui, p.text, p.hint, left, (elapsed / p.secs).min(1.0));
+                        big_step(ui, tr(p.text), p.hint.map(tr), left, (elapsed / p.secs).min(1.0));
                         ui.add_space(12.0);
                         steps_overview(ui, timeline, Some(*phase));
                     }
                     DfuState::Waiting(_) => {
                         big_step(
                             ui,
-                            "Release all buttons",
-                            Some("Checking for the device ..."),
+                            tr("Release all buttons"),
+                            Some(tr("Checking for the device ...")),
                             0.0,
                             1.0,
                         );
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Waiting for the device ...");
+                            ui.label(tr("Waiting for the device ..."));
                         });
                     }
                     DfuState::Success => {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("\u{e182}").color(GREEN).size(28.0));
                             ui.vertical(|ui| {
-                                ui.label(theme::title("DFU mode detected", 18.0));
-                                ui.label("You can release the button. The device is ready to be flashed.");
+                                ui.label(theme::title(tr("DFU mode detected"), 18.0));
+                                ui.label(tr("You can release the button. The device is ready to be flashed."));
                             });
                         });
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             if ui
-                                .add(theme::accent_button("\u{e2de}  Go to Smart Flash", ACCENT, true))
+                                .add(theme::accent_button(tr("\u{e2de}  Go to Smart Flash"), ACCENT, true))
                                 .clicked()
                             {
                                 action = Some("flash");
                             }
-                            if ui.button("Close").clicked() {
+                            if ui.button(tr("Close")).clicked() {
                                 action = Some("close");
                             }
                         });
@@ -1774,22 +1839,22 @@ impl App {
                         ui.horizontal_top(|ui| {
                             ui.label(RichText::new("\u{e4f6}").color(RED).size(24.0));
                             ui.vertical(|ui| {
-                                ui.label(theme::title("DFU mode not detected", 17.0));
+                                ui.label(theme::title(tr("DFU mode not detected"), 17.0));
                                 ui.add(egui::Label::new(reason.as_str()).wrap());
                             });
                         });
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             if ui
-                                .add(theme::accent_button("\u{e094}  Try again", ACCENT, true))
+                                .add(theme::accent_button(tr("\u{e094}  Try again"), ACCENT, true))
                                 .clicked()
                             {
                                 action = Some("start");
                             }
-                            if ui.button("Show written guide").clicked() {
+                            if ui.button(tr("Show written guide")).clicked() {
                                 action = Some("guide");
                             }
-                            if ui.button("Close").clicked() {
+                            if ui.button(tr("Close")).clicked() {
                                 action = Some("close");
                             }
                         });
@@ -1798,7 +1863,7 @@ impl App {
 
                 if dfu.active() {
                     ui.add_space(10.0);
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         action = Some("close");
                     }
                 }
@@ -1836,8 +1901,8 @@ impl App {
     fn guide_page(&mut self, ui: &mut egui::Ui) {
         page_title(
             ui,
-            "Recovery & DFU mode",
-            "If a restore fails, put the device into recovery or DFU mode and flash again.",
+            tr("Recovery & DFU mode"),
+            tr("If a restore fails, put the device into recovery or DFU mode and flash again."),
         );
         let detected = self.device().and_then(|d| Family::from_product(&d.product));
         let family = self
@@ -1848,28 +1913,28 @@ impl App {
         ui.horizontal(|ui| {
             if ui
                 .add(theme::accent_button(
-                    "\u{e3d0}  Start DFU assistant",
+                    tr("\u{e3d0}  Start DFU assistant"),
                     ACCENT,
                     true,
                 ))
-                .on_hover_text(
+                .on_hover_text(tr(
                     "Guides you through the button sequence with a timer and detects DFU mode",
-                )
+                ))
                 .clicked()
             {
                 self.open_dfu_assistant(Some(family));
             }
             ui.add_space(12.0);
-            ui.label("Device:");
+            ui.label(tr("Device:"));
             egui::ComboBox::from_id_salt("guide_family")
-                .selected_text(family.label())
+                .selected_text(tr(family.label()))
                 .width(320.0)
                 .show_ui(ui, |ui| {
                     for f in Family::ALL {
                         let label = if Some(f) == detected {
-                            format!("{} (connected)", f.label())
+                            trf("{} (connected)", &[&tr(f.label())])
                         } else {
-                            f.label().to_string()
+                            tr(f.label()).to_string()
                         };
                         if ui.selectable_label(f == family, label).clicked() {
                             self.guide_family = Some(f);
@@ -1883,9 +1948,9 @@ impl App {
             ui.columns(2, |cols| {
                 theme::surface(&mut cols[0], Surface::Card, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(theme::title("Recovery mode", 16.0));
+                    ui.label(theme::title(tr("Recovery mode"), 16.0));
                     ui.label(
-                        RichText::new("Use this first. The screen shows a cable pointing to a computer.")
+                        RichText::new(tr("Use this first. The screen shows a cable pointing to a computer."))
                             .weak()
                             .small(),
                     );
@@ -1894,9 +1959,9 @@ impl App {
                 });
                 theme::surface(&mut cols[1], Surface::Card, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(theme::title("DFU mode", 16.0));
+                    ui.label(theme::title(tr("DFU mode"), 16.0));
                     ui.label(
-                        RichText::new("Deepest restore mode - use it when recovery mode does not help. The screen stays black.")
+                        RichText::new(tr("Deepest restore mode - use it when recovery mode does not help. The screen stays black."))
                             .weak()
                             .small(),
                     );
@@ -1904,7 +1969,7 @@ impl App {
                     steps(ui, family.dfu_steps());
                     ui.add_space(6.0);
                     ui.label(
-                        RichText::new("If the Apple logo appears, a button was held too long - start again.")
+                        RichText::new(tr("If the Apple logo appears, a button was held too long - start again."))
                             .color(ORANGE)
                             .small(),
                     );
@@ -1913,16 +1978,16 @@ impl App {
             ui.add_space(10.0);
             theme::surface(ui, Surface::Card, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(RichText::new("Leave recovery / DFU mode").strong());
+                ui.label(RichText::new(tr("Leave recovery / DFU mode")).strong());
                 ui.label(
-                    "Use \"Exit recovery\" in Obsidia, or force restart the device:",
+                    tr("Use \"Exit recovery\" in Obsidia, or force restart the device:"),
                 );
-                ui.label(RichText::new(family.force_restart()).weak());
+                ui.label(RichText::new(tr(family.force_restart())).weak());
             });
             if let Some(dev) = self.device() {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Current mode:").weak());
+                    ui.label(RichText::new(tr("Current mode:")).weak());
                     mode_badge(ui, &dev.mode);
                 });
             }
@@ -1931,7 +1996,7 @@ impl App {
 
     fn about_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_about;
-        egui::Window::new("About Obsidia")
+        egui::Window::new(tr("About Obsidia"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1945,7 +2010,7 @@ impl App {
                     }
                     ui.label(theme::title("Obsidia", 24.0));
                     ui.label(
-                        RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).weak(),
+                        RichText::new(trf("Version {}", &[&env!("CARGO_PKG_VERSION")])).weak(),
                     );
                     ui.add_space(6.0);
                     ui.label(
@@ -1955,14 +2020,14 @@ impl App {
                         ))
                         .color(GREEN),
                     );
-                    ui.label("An open-source project by the MirraNET organization.");
+                    ui.label(tr("An open-source project by the MirraNET organization."));
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         // center the two buttons
                         ui.add_space((ui.available_width() - 300.0).max(0.0) / 2.0);
                         if ui
                             .add(theme::accent_button(
-                                &format!("{}  Source code", icons::GITHUB_LOGO),
+                                &format!("{}  {}", icons::GITHUB_LOGO, tr("Source code")),
                                 ACCENT,
                                 true,
                             ))
@@ -1984,20 +2049,20 @@ impl App {
                     .num_columns(2)
                     .spacing([16.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label(RichText::new("License").weak());
+                        ui.label(RichText::new(tr("License")).weak());
                         ui.label("MIT");
                         ui.end_row();
-                        ui.label(RichText::new("Publisher").weak());
+                        ui.label(RichText::new(tr("Publisher")).weak());
                         link(ui, "MirraNET", MIRRANET_URL);
                         ui.end_row();
-                        ui.label(RichText::new("Issues").weak());
+                        ui.label(RichText::new(tr("Issues")).weak());
                         link(
                             ui,
-                            "Report a problem on GitHub",
+                            tr("Report a problem on GitHub"),
                             &format!("{GITHUB_URL}/issues"),
                         );
                         ui.end_row();
-                        ui.label(RichText::new("Uses").weak());
+                        ui.label(RichText::new(tr("Uses")).weak());
                         ui.vertical(|ui| {
                             link(
                                 ui,
@@ -2012,7 +2077,7 @@ impl App {
                     });
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new("Not affiliated with or endorsed by Apple Inc.")
+                    RichText::new(tr("Not affiliated with or endorsed by Apple Inc."))
                         .weak()
                         .small(),
                 );
@@ -2029,17 +2094,19 @@ impl App {
     }
 
     fn start_driver_install(&mut self, remove_store: bool) {
-        self.start_job(JobKind::Other, "Install Apple drivers", move |out| {
+        self.start_job(JobKind::Other, tr("Install Apple drivers"), move |out| {
             let fail = |e: anyhow::Error| format!("{e:#}");
             if remove_store {
-                out.send(Msg::JobStatus("Removing the Apple Devices app ...".into()));
+                out.send(Msg::JobStatus(
+                    tr("Removing the Apple Devices app ...").into(),
+                ));
                 out.send(Msg::Log(
                     "Removing Store packages AppleInc.AppleDevices / AppleInc.iTunes".into(),
                 ));
                 drivers::remove_store_apps().map_err(fail)?;
             }
             out.send(Msg::JobStatus(
-                "Downloading the iTunes installer from apple.com ...".into(),
+                tr("Downloading the iTunes installer from apple.com ...").into(),
             ));
             let mut last = 0u64;
             let installer = drivers::download_installer(|done, total| {
@@ -2057,18 +2124,20 @@ impl App {
                 "Installer verified: {}",
                 installer.display()
             )));
-            out.send(Msg::JobStatus("Unpacking the driver package ...".into()));
+            out.send(Msg::JobStatus(
+                tr("Unpacking the driver package ...").into(),
+            ));
             let msi = drivers::extract_driver(&installer).map_err(fail)?;
             out.send(Msg::Log(format!("Driver package: {}", msi.display())));
             out.send(Msg::JobStatus(
-                "Installing drivers - confirm the Windows prompt ...".into(),
+                tr("Installing drivers - confirm the Windows prompt ...").into(),
             ));
             drivers::install_msi(&msi).map_err(fail)?;
             out.send(Msg::DriverStatus(drivers::status()));
-            Ok(
-                "Apple drivers installed. Unplug the device and connect it again before flashing."
-                    .into(),
+            Ok(tr(
+                "Apple drivers installed. Unplug the device and connect it again before flashing.",
             )
+            .into())
         });
     }
 
@@ -2079,7 +2148,7 @@ impl App {
         let mut open = true;
         let mut install = None;
         let busy = self.job.is_some();
-        egui::Window::new("Apple Drivers")
+        egui::Window::new(tr("Apple Drivers"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -2088,42 +2157,42 @@ impl App {
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
                 ui.label(
-                    "Newer devices, iPhone 14 and later in particular, often stop accepting firmware \
+                    tr("Newer devices, iPhone 14 and later in particular, often stop accepting firmware \
                      uploads in recovery mode with the drivers of the Microsoft Store apps. iTunes from \
-                     apple.com ships a different driver package that handles these transfers reliably.",
+                     apple.com ships a different driver package that handles these transfers reliably."),
                 );
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(
-                        "Obsidia downloads the official installer from apple.com, checks Apple's signature \
-                         and installs only Apple Mobile Device Support - not iTunes itself.",
+                        tr("Obsidia downloads the official installer from apple.com, checks Apple's signature \
+                         and installs only Apple Mobile Device Support - not iTunes itself."),
                     )
                     .weak()
                     .small(),
                 );
                 ui.add_space(10.0);
 
-                ui.label(RichText::new("Installed").strong());
+                ui.label(RichText::new(tr("Installed")).strong());
                 match &panel.status {
                     None => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Checking ...");
+                            ui.label(tr("Checking ..."));
                         });
                     }
                     Some(status) => {
                         egui::Grid::new("driver-status").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                            ui.label(RichText::new("Classic drivers").weak());
+                            ui.label(RichText::new(tr("Classic drivers")).weak());
                             match &status.classic {
                                 Some(v) => ui.label(RichText::new(format!("\u{e182} Version {v}")).color(GREEN)),
-                                None => ui.label(RichText::new("Not installed").color(ORANGE)),
+                                None => ui.label(RichText::new(tr("Not installed")).color(ORANGE)),
                             };
                             ui.end_row();
-                            ui.label(RichText::new("Store app").weak());
+                            ui.label(RichText::new(tr("Store app")).weak());
                             if status.store_app {
-                                ui.label(RichText::new("Apple Devices / iTunes (Store) installed").color(ORANGE));
+                                ui.label(RichText::new(tr("Apple Devices / iTunes (Store) installed")).color(ORANGE));
                             } else {
-                                ui.label("Not installed");
+                                ui.label(tr("Not installed"));
                             }
                             ui.end_row();
                         });
@@ -2131,7 +2200,7 @@ impl App {
                         if status.store_app {
                             ui.checkbox(
                                 &mut panel.remove_store,
-                                "Remove the Store app first (recommended, it brings its own drivers)",
+                                tr("Remove the Store app first (recommended, it brings its own drivers)"),
                             );
                         }
                     }
@@ -2139,7 +2208,7 @@ impl App {
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new(
-                        "Windows asks for administrator rights. Disconnect all devices before you start.",
+                        tr("Windows asks for administrator rights. Disconnect all devices before you start."),
                     )
                     .weak()
                     .small(),
@@ -2147,8 +2216,8 @@ impl App {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let label = match panel.status.as_ref().and_then(|s| s.classic.as_ref()) {
-                        Some(_) => "Reinstall drivers",
-                        None => "Install drivers",
+                        Some(_) => tr("Reinstall drivers"),
+                        None => tr("Install drivers"),
                     };
                     let enabled = panel.status.is_some() && !busy;
                     if ui.add_enabled(enabled, theme::accent_button(label, ACCENT, enabled)).clicked() {
@@ -2156,7 +2225,7 @@ impl App {
                         install = Some(remove);
                     }
                     if busy {
-                        ui.label(RichText::new("Another task is running.").weak().small());
+                        ui.label(RichText::new(tr("Another task is running.")).weak().small());
                     }
                 });
             });
@@ -2172,7 +2241,7 @@ impl App {
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         let mut changed = false;
-        egui::Window::new("Settings")
+        egui::Window::new(tr("Settings"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -2180,46 +2249,71 @@ impl App {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                ui.label(RichText::new("Firmware").strong());
+                ui.label(RichText::new(tr("Firmware")).strong());
                 changed |= ui
-                    .checkbox(&mut self.settings.auto_clean, "Auto-clean expired firmware")
+                    .checkbox(&mut self.settings.auto_clean, tr("Auto-clean expired firmware"))
                     .changed();
                 ui.label(
                     RichText::new(
-                        "Downloaded firmware is reused while Apple signs it. With auto-clean, files Apple no longer signs are deleted automatically.",
+                        tr("Downloaded firmware is reused while Apple signs it. With auto-clean, files Apple no longer signs are deleted automatically."),
                     )
                     .weak()
                     .small(),
                 );
-                ui.add_space(10.0);
-
-                ui.label(RichText::new("Restore").strong());
                 changed |= ui
                     .checkbox(
-                        &mut self.settings.auto_retry,
-                        "Retry automatically if the connection is lost (up to 3 attempts)",
+                        &mut self.settings.auto_download,
+                        tr("Download the newest firmware for connected devices automatically"),
                     )
                     .changed();
                 ui.add_space(10.0);
 
-                ui.label(RichText::new("Firmware folder").strong());
+                ui.label(RichText::new(tr("Language")).strong());
+                let before = self.settings.language.clone();
+                egui::ComboBox::from_id_salt("language")
+                    .selected_text(match self.settings.language.as_str() {
+                        "en" => tr("English"),
+                        "de" => "Deutsch",
+                        _ => tr("System"),
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.settings.language, String::new(), tr("System"));
+                        ui.selectable_value(&mut self.settings.language, "en".to_string(), tr("English"));
+                        ui.selectable_value(&mut self.settings.language, "de".to_string(), "Deutsch");
+                    });
+                if self.settings.language != before {
+                    crate::i18n::set_language(&self.settings.language);
+                    changed = true;
+                }
+                ui.add_space(10.0);
+
+                ui.label(RichText::new(tr("Restore")).strong());
+                changed |= ui
+                    .checkbox(
+                        &mut self.settings.auto_retry,
+                        tr("Retry automatically if the connection is lost (up to 3 attempts)"),
+                    )
+                    .changed();
+                ui.add_space(10.0);
+
+                ui.label(RichText::new(tr("Firmware folder")).strong());
                 let current = firmware::firmware_dir()
                     .unwrap_or_else(|_| firmware::default_firmware_dir());
                 ui.label(RichText::new(current.display().to_string()).small());
                 if firmware::is_cloud_synced(&current) {
                     ui.label(
                         RichText::new(
-                            "\u{e4e0} This folder is synced with OneDrive. Firmware files are several GB and syncing \
-                             can lock files during a restore - a local folder is recommended.",
+                            tr("\u{e4e0} This folder is synced with OneDrive. Firmware files are several GB and syncing \
+                             can lock files during a restore - a local folder is recommended."),
                         )
                         .color(ORANGE)
                         .small(),
                     );
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Change ...").clicked() {
+                    if ui.button(tr("Change ...")).clicked() {
                         if let Some(dir) = rfd::FileDialog::new()
-                            .set_title("Choose firmware folder")
+                            .set_title(tr("Choose firmware folder"))
                             .set_directory(&current)
                             .pick_folder()
                         {
@@ -2227,36 +2321,36 @@ impl App {
                             changed = true;
                         }
                     }
-                    if self.settings.firmware_dir.is_some() && ui.button("Reset to default").clicked() {
+                    if self.settings.firmware_dir.is_some() && ui.button(tr("Reset to default")).clicked() {
                         self.settings.firmware_dir = None;
                         changed = true;
                     }
-                    if ui.button("Open").clicked() {
+                    if ui.button(tr("Open")).clicked() {
                         open_path(&current);
                     }
                 });
                 ui.label(
-                    RichText::new("Existing files are not moved; copy them over if you want to keep them.")
+                    RichText::new(tr("Existing files are not moved; copy them over if you want to keep them."))
                         .weak()
                         .small(),
                 );
                 ui.add_space(10.0);
 
-                ui.label(RichText::new("Updates").strong());
+                ui.label(RichText::new(tr("Updates")).strong());
                 if updater::store_managed() {
                     ui.label(
-                        RichText::new("Obsidia is installed from the Microsoft Store, which keeps it up to date.")
+                        RichText::new(tr("Obsidia is installed from the Microsoft Store, which keeps it up to date."))
                             .weak()
                             .small(),
                     );
                 } else {
                 changed |= ui
-                    .checkbox(&mut self.settings.check_updates, "Check for updates on start-up")
+                    .checkbox(&mut self.settings.check_updates, tr("Check for updates on start-up"))
                     .changed();
                 if !updater::can_install() {
                     ui.label(
                         RichText::new(
-                            "Installing updates needs administrator rights. You will still be told about new versions.",
+                            tr("Installing updates needs administrator rights. You will still be told about new versions."),
                         )
                         .weak()
                         .small(),
@@ -2264,28 +2358,28 @@ impl App {
                 }
                 if !updater::auto_check_enabled() {
                     ui.label(
-                        RichText::new("Disabled by your administrator (policy or OBSIDIA_NO_UPDATE_CHECK).")
+                        RichText::new(tr("Disabled by your administrator (policy or OBSIDIA_NO_UPDATE_CHECK)."))
                             .color(ORANGE)
                             .small(),
                     );
                 }
-                if ui.button("Check now").clicked() {
+                if ui.button(tr("Check now")).clicked() {
                     self.update_dismissed = false;
                     self.check_for_updates(true);
                 }
                 }
                 ui.add_space(10.0);
 
-                ui.label(RichText::new("Folders").strong());
+                ui.label(RichText::new(tr("Folders")).strong());
                 let base = firmware::data_dir();
                 egui::Grid::new("folders").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
                     for (label, dir) in [
-                        ("Backups", base.join("Backups")),
-                        ("Logs", base.join("Logs")),
+                        (tr("Backups"), base.join(tr("Backups"))),
+                        (tr("Logs"), base.join(tr("Logs"))),
                     ] {
                         ui.label(RichText::new(label).weak());
                         ui.label(RichText::new(dir.display().to_string()).small());
-                        if ui.button("Open").clicked() {
+                        if ui.button(tr("Open")).clicked() {
                             let _ = std::fs::create_dir_all(&dir);
                             open_path(&dir);
                         }
@@ -2304,19 +2398,19 @@ impl App {
     fn local_firmware_page(&mut self, ui: &mut egui::Ui) {
         page_title(
             ui,
-            "Local Firmware",
-            "Downloaded firmware is reused as long as Apple still signs it.",
+            tr("Local Firmware"),
+            tr("Downloaded firmware is reused as long as Apple still signs it."),
         );
         ui.horizontal(|ui| {
-            if ui.button("\u{e61e} Import Local Firmware").clicked() {
+            if ui.button(tr("\u{e61e} Import Local Firmware")).clicked() {
                 self.import_local_firmware();
             }
-            if ui.button("\u{e256} Open Folder").clicked() {
+            if ui.button(tr("\u{e256} Open Folder")).clicked() {
                 if let Ok(dir) = firmware::firmware_dir() {
                     open_path(&dir);
                 }
             }
-            if ui.button("\u{e036} Refresh").clicked() {
+            if ui.button(tr("\u{e036} Refresh")).clicked() {
                 self.refresh_local_files();
             }
             let expired = self
@@ -2331,12 +2425,14 @@ impl App {
                 )
                 .clicked()
             {
-                let n = self.remove_expired("Cleanup");
-                self.notice = Some((format!("Removed {n} expired firmware file(s)."), false));
+                let n = self.remove_expired(tr("Cleanup"));
+                self.notice = Some((trf("Removed {} expired firmware file(s).", &[&n]), false));
             }
             if ui
-                .checkbox(&mut self.settings.auto_clean, "Auto-clean")
-                .on_hover_text("Automatically delete firmware that Apple no longer signs")
+                .checkbox(&mut self.settings.auto_clean, tr("Auto-clean"))
+                .on_hover_text(tr(
+                    "Automatically delete firmware that Apple no longer signs",
+                ))
                 .changed()
             {
                 self.settings.save();
@@ -2349,10 +2445,10 @@ impl App {
             empty_state(
                 ui,
                 "\u{e256}",
-                "No firmware downloaded yet",
+                tr("No firmware downloaded yet"),
                 &format!(
                     "Downloaded firmware is stored in {}.",
-                    firmware::data_dir().join("Firmware").display()
+                    firmware::data_dir().join(tr("Firmware")).display()
                 ),
                 None,
             );
@@ -2371,7 +2467,7 @@ impl App {
             .column(Column::exact(95.0))
             .column(Column::exact(205.0))
             .header(26.0, |mut h| {
-                for t in ["File", "Version", "Size", "Status", ""] {
+                for t in [tr("File"), tr("Version"), tr("Size"), tr("Status"), ""] {
                     h.col(|ui| {
                         ui.label(RichText::new(t).strong());
                     });
@@ -2398,30 +2494,30 @@ impl App {
                         });
                         row.col(|ui| match status {
                             LocalStatus::Signed => {
-                                ui.label(RichText::new("● Signed").color(GREEN));
+                                ui.label(RichText::new(tr("● Signed")).color(GREEN));
                             }
                             LocalStatus::Expired => {
-                                ui.label(RichText::new("\u{e18a} Expired").color(RED))
-                                    .on_hover_text("Apple no longer signs this firmware");
+                                ui.label(RichText::new(tr("\u{e18a} Expired")).color(RED))
+                                    .on_hover_text(tr("Apple no longer signs this firmware"));
                             }
                             LocalStatus::Checking => {
                                 ui.spinner();
                             }
                             LocalStatus::Unknown => {
-                                ui.label(RichText::new("? Unknown").weak())
-                                    .on_hover_text("Signing status could not be determined");
+                                ui.label(RichText::new(tr("? Unknown")).weak())
+                                    .on_hover_text(tr("Signing status could not be determined"));
                             }
                         });
                         row.col(|ui| {
                             let usable = status != LocalStatus::Expired;
                             if ui
-                                .add_enabled(usable, egui::Button::new("Use for flashing"))
-                                .on_disabled_hover_text("Apple no longer signs this firmware")
+                                .add_enabled(usable, egui::Button::new(tr("Use for flashing")))
+                                .on_disabled_hover_text(tr("Apple no longer signs this firmware"))
                                 .clicked()
                             {
                                 select = Some(file.path.clone());
                             }
-                            if ui.button("\u{e4a6} Delete").clicked() {
+                            if ui.button(tr("\u{e4a6} Delete")).clicked() {
                                 delete = Some(file.path.clone());
                             }
                         });
@@ -2458,7 +2554,7 @@ impl App {
             Some(Load::Failed(e)) => {
                 let e = e.clone();
                 ui.colored_label(RED, format!("Could not load firmware list: {e}"));
-                if ui.button("Retry").clicked() {
+                if ui.button(tr("Retry")).clicked() {
                     self.firmwares.remove(product);
                 }
                 return;
@@ -2466,13 +2562,15 @@ impl App {
             _ => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Loading firmware list ...");
+                    ui.label(tr("Loading firmware list ..."));
                 });
                 return;
             }
         };
         if firmwares.is_empty() {
-            ui.label("Apple is currently not signing any firmware for this model.");
+            ui.label(tr(
+                "Apple is currently not signing any firmware for this model.",
+            ));
             return;
         }
 
@@ -2509,7 +2607,14 @@ impl App {
                 if selectable {
                     h.col(|_| {});
                 }
-                for t in ["Version", "Build", "Released", "Size", "Status", "Download"] {
+                for t in [
+                    tr("Version"),
+                    tr("Build"),
+                    tr("Released"),
+                    tr("Size"),
+                    tr("Status"),
+                    tr("Download"),
+                ] {
                     h.col(|ui| {
                         ui.label(RichText::new(t).strong());
                     });
@@ -2548,9 +2653,9 @@ impl App {
                         });
                         row.col(|ui| {
                             if fw.signed {
-                                ui.label(RichText::new("● Signed").color(GREEN));
+                                ui.label(RichText::new(tr("● Signed")).color(GREEN));
                             } else {
-                                ui.label(RichText::new("\u{e18a} Not signed").weak());
+                                ui.label(RichText::new(tr("\u{e18a} Not signed")).weak());
                             }
                         });
                         row.col(|ui| {
@@ -2569,7 +2674,7 @@ impl App {
                                         );
                                         if ui
                                             .button("\u{e4f6}")
-                                            .on_hover_text("Cancel (can be resumed)")
+                                            .on_hover_text(tr("Cancel (can be resumed)"))
                                             .clicked()
                                         {
                                             cancel = Some(fw.url.clone());
@@ -2577,12 +2682,12 @@ impl App {
                                     }
                                     Progress::Verifying => {
                                         ui.spinner();
-                                        ui.label("Verifying ...");
+                                        ui.label(tr("Verifying ..."));
                                     }
                                 }
                             } else if fw.is_cached() {
-                                ui.label(RichText::new("\u{e182} Downloaded").color(GREEN));
-                            } else if ui.button("\u{e20c} Download").clicked() {
+                                ui.label(RichText::new(tr("\u{e182} Downloaded")).color(GREEN));
+                            } else if ui.button(tr("\u{e20c} Download")).clicked() {
                                 download = Some(fw.clone());
                             }
                         });
@@ -2615,7 +2720,7 @@ impl App {
         let mut close = false;
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            if ui.button("View log").clicked() {
+            if ui.button(tr("View log")).clicked() {
                 self.show_log = true;
             }
         });
@@ -2667,7 +2772,7 @@ impl App {
                     ui.add(bar.desired_width(width).desired_height(8.0).fill(ACCENT));
                     ui.add_space(14.0);
                     ui.label(
-                        RichText::new(format!("Flashing {label}"))
+                        RichText::new(trf("Flashing {}", &[&label]))
                             .size(17.0)
                             .strong(),
                     );
@@ -2675,7 +2780,7 @@ impl App {
                     ui.label(RichText::new(&job.status).weak());
                     ui.add_space(10.0);
                     ui.label(
-                        RichText::new("Do not disconnect the device.")
+                        RichText::new(tr("Do not disconnect the device."))
                             .color(ORANGE)
                             .small(),
                     );
@@ -2688,12 +2793,12 @@ impl App {
                             .fill(GREEN),
                     );
                     ui.add_space(14.0);
-                    ui.label(theme::title("Congratulations!", 18.0));
+                    ui.label(theme::title(tr("Congratulations!"), 18.0));
                     ui.label(RichText::new(msg).weak());
                     ui.add_space(14.0);
                     if ui
                         .add(
-                            theme::accent_button("Done", ACCENT, true)
+                            theme::accent_button(tr("Done"), ACCENT, true)
                                 .min_size(egui::vec2(160.0, 34.0)),
                         )
                         .clicked()
@@ -2709,12 +2814,12 @@ impl App {
                             .fill(DANGER),
                     );
                     ui.add_space(14.0);
-                    ui.label(theme::title("Flashing failed", 18.0).color(RED));
+                    ui.label(theme::title(tr("Flashing failed"), 18.0).color(RED));
                     ui.label(RichText::new(e).weak());
                     ui.add_space(14.0);
                     if ui
                         .add(
-                            theme::accent_button("Back", ACCENT, true)
+                            theme::accent_button(tr("Back"), ACCENT, true)
                                 .min_size(egui::vec2(160.0, 34.0)),
                         )
                         .clicked()
@@ -2722,7 +2827,7 @@ impl App {
                         close = true;
                     }
                     ui.add_space(6.0);
-                    if ui.button("Enter DFU mode (assistant)").clicked() {
+                    if ui.button(tr("Enter DFU mode (assistant)")).clicked() {
                         close = true;
                         self.open_dfu_assistant(None);
                     }
@@ -2743,8 +2848,8 @@ impl App {
                 ui.add_space(30.0);
                 device_picture(ui, "iPhone", 150.0, false);
                 ui.add_space(12.0);
-                ui.label(RichText::new("No device").strong());
-                ui.label(RichText::new("Connect via USB").weak().small());
+                ui.label(RichText::new(tr("No device")).strong());
+                ui.label(RichText::new(tr("Connect via USB")).weak().small());
             });
             return;
         };
@@ -2797,7 +2902,7 @@ impl App {
                     ui.end_row();
                 };
                 if let Some(s) = &dev.serial {
-                    row("SN", s.clone());
+                    row(tr("SN"), s.clone());
                 }
                 if let Some(v) = &dev.version {
                     row(
@@ -2809,30 +2914,30 @@ impl App {
                         v.clone(),
                     );
                 }
-                row("Mode", format!("{} Mode", dev.mode));
+                row(tr("Mode"), trf("{} Mode", &[&dev.mode]));
                 if let Some(c) = dev.capacity {
-                    row("Capacity", HumanBytes(c).to_string());
+                    row(tr("Capacity"), HumanBytes(c).to_string());
                 }
                 if let Some(b) = dev.battery {
-                    row("Battery", format!("{b} %"));
+                    row(tr("Battery"), format!("{b} %"));
                 }
             });
 
         ui.add_space(14.0);
         ui.separator();
         ui.add_space(6.0);
-        ui.label(RichText::new("Keep data or not").strong());
+        ui.label(RichText::new(tr("Keep data or not")).strong());
         ui.add_space(2.0);
         ui.add_enabled_ui(!self.busy(), |ui| {
-            ui.radio_value(&mut self.erase, false, "Keep data (update)");
-            ui.radio_value(&mut self.erase, true, "Erase (clean restore)");
+            ui.radio_value(&mut self.erase, false, tr("Keep data (update)"));
+            ui.radio_value(&mut self.erase, true, tr("Erase (clean restore)"));
         });
         ui.add_space(4.0);
         ui.label(
             RichText::new(if self.erase {
-                "All data on the device will be deleted."
+                tr("All data on the device will be deleted.")
             } else {
-                "Apps and data are kept. Not possible for downgrades."
+                tr("Apps and data are kept. Not possible for downgrades.")
             })
             .small()
             .weak(),
@@ -2843,9 +2948,9 @@ impl App {
             ui.add_space(4.0);
             let blocker = self.flash_blocker();
             let label = if self.busy() {
-                "Flashing ..."
+                tr("Flashing ...")
             } else {
-                "\u{e2de}  Flash"
+                tr("\u{e2de}  Flash")
             };
             let btn = theme::accent_button(
                 label,
@@ -2868,15 +2973,19 @@ impl App {
     }
 
     fn device_tab(&mut self, ui: &mut egui::Ui) {
-        page_title(ui, "Device", "Overview of the connected iPhone or iPad.");
+        page_title(
+            ui,
+            tr("Device"),
+            tr("Overview of the connected iPhone or iPad."),
+        );
         let Some(dev) = self.device().cloned() else {
             empty_state(
                 ui,
                 "\u{e1e0}",
-                "No device connected",
-                &format!(
+                tr("No device connected"),
+                &trf(
                     "Connect an iPhone or iPad via USB and {}.",
-                    device::no_device_hint()
+                    &[&tr(device::no_device_hint())],
                 ),
                 self.scan_error.as_deref(),
             );
@@ -2946,7 +3055,7 @@ impl App {
                                 ui.label(v);
                                 ui.end_row();
                             };
-                            row("Model identifier", dev.product.clone());
+                            row(tr("Model identifier"), dev.product.clone());
                             if let Some(v) = &dev.version {
                                 row(
                                     if dev.kind() == "iPad" {
@@ -2958,16 +3067,16 @@ impl App {
                                 );
                             }
                             if let Some(b) = &dev.build {
-                                row("Build", b.clone());
+                                row(tr("Build"), b.clone());
                             }
                             if let Some(c) = dev.capacity {
-                                row("Capacity", HumanBytes(c).to_string());
+                                row(tr("Capacity"), HumanBytes(c).to_string());
                             }
                             if let Some(b) = dev.battery {
-                                row("Battery", format!("{b} %"));
+                                row(tr("Battery"), format!("{b} %"));
                             }
                             if let Some(s) = &dev.serial {
-                                row("Serial number", s.clone());
+                                row(tr("Serial number"), s.clone());
                             }
                             if !dev.ecid.is_empty() {
                                 row("ECID", dev.ecid.clone());
@@ -2982,7 +3091,7 @@ impl App {
                     let busy = self.busy();
                     let normal = dev.mode == Mode::Normal;
                     if ui
-                        .add_enabled(!busy && normal, egui::Button::new("\u{e248}  Backup"))
+                        .add_enabled(!busy && normal, egui::Button::new(tr("\u{e248}  Backup")))
                         .clicked()
                     {
                         self.start_backup(dev.clone());
@@ -2990,7 +3099,7 @@ impl App {
                     if ui
                         .add_enabled(
                             !busy && normal,
-                            egui::Button::new("\u{e5d4}  Enter recovery"),
+                            egui::Button::new(tr("\u{e5d4}  Enter recovery")),
                         )
                         .clicked()
                     {
@@ -2999,14 +3108,14 @@ impl App {
                     if ui
                         .add_enabled(
                             !busy && !normal,
-                            egui::Button::new("\u{e08a}  Exit recovery"),
+                            egui::Button::new(tr("\u{e08a}  Exit recovery")),
                         )
                         .clicked()
                     {
                         self.start_exit_recovery();
                     }
                     if ui
-                        .add(theme::accent_button("\u{e2de}  Flash", ACCENT, true))
+                        .add(theme::accent_button(tr("\u{e2de}  Flash"), ACCENT, true))
                         .clicked()
                     {
                         self.tab = Tab::Flash;
@@ -3018,13 +3127,13 @@ impl App {
     }
 
     fn diagnostics_section(&mut self, ui: &mut egui::Ui, dev: &Device, model: &str) {
-        ui.label(theme::title("Battery & diagnostics", 18.0));
+        ui.label(theme::title(tr("Battery & diagnostics"), 18.0));
         ui.add_space(6.0);
         if dev.mode != Mode::Normal {
             ui.label(
-                RichText::new(
+                RichText::new(tr(
                     "Available when the device is started normally and trusts this computer.",
-                )
+                ))
                 .weak(),
             );
             return;
@@ -3046,14 +3155,14 @@ impl App {
             None => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("Reading battery and hardware details ...").weak());
+                    ui.label(RichText::new(tr("Reading battery and hardware details ...")).weak());
                 });
                 return;
             }
             Some(Err(e)) => {
                 ui.label(RichText::new(format!("\u{e4e0}  {e}")).color(ORANGE));
                 if ui
-                    .add_enabled(!busy, egui::Button::new("\u{e094}  Try again"))
+                    .add_enabled(!busy, egui::Button::new(tr("\u{e094}  Try again")))
                     .clicked()
                 {
                     self.load_diagnostics(dev);
@@ -3068,19 +3177,22 @@ impl App {
         ui.horizontal_top(|ui| {
             theme::surface(ui, Surface::Card, |ui| {
                 ui.set_width(card_w);
-                battery_card(ui, report.battery.as_ref());
+                ui.vertical(|ui| battery_card(ui, report.battery.as_ref()));
             });
             ui.add_space(16.0);
             theme::surface(ui, Surface::Card, |ui| {
                 ui.set_width(card_w);
-                hardware_card(ui, &report);
+                ui.vertical(|ui| hardware_card(ui, &report));
             });
         });
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!busy && !loading, egui::Button::new("\u{e094}  Refresh"))
+                .add_enabled(
+                    !busy && !loading,
+                    egui::Button::new(tr("\u{e094}  Refresh")),
+                )
                 .clicked()
             {
                 self.load_diagnostics(dev);
@@ -3088,12 +3200,12 @@ impl App {
             if loading {
                 ui.spinner();
             }
-            if ui.button("\u{eaf0}  Export report").clicked() {
+            if ui.button(tr("\u{eaf0}  Export report")).clicked() {
                 match diagnostics::save_report(dev, model, &report) {
                     Ok(path) => {
                         self.log
                             .push(format!("Device report saved to {}", path.display()));
-                        self.notice = Some((format!("Report saved to {}", path.display()), false));
+                        self.notice = Some((trf("Report saved to {}", &[&path.display()]), false));
                         if let Some(dir) = path.parent() {
                             open_path(dir);
                         }
@@ -3104,26 +3216,26 @@ impl App {
                 }
             }
             if ui
-                .add_enabled(!busy, egui::Button::new("\u{e036}  Restart device"))
+                .add_enabled(!busy, egui::Button::new(tr("\u{e036}  Restart device")))
                 .clicked()
             {
                 let udid = dev.udid.clone();
                 self.spawn(move |out| {
                     let msg = match diagnostics::restart(&udid) {
-                        Ok(()) => "Restarting the device".to_string(),
+                        Ok(()) => tr("Restarting the device").to_string(),
                         Err(e) => format!("Restart failed: {e:#}"),
                     };
                     out.send(Msg::Log(msg));
                 });
             }
             if ui
-                .add_enabled(!busy, egui::Button::new("\u{e3da}  Shut down"))
+                .add_enabled(!busy, egui::Button::new(tr("\u{e3da}  Shut down")))
                 .clicked()
             {
                 let udid = dev.udid.clone();
                 self.spawn(move |out| {
                     let msg = match diagnostics::shutdown(&udid) {
-                        Ok(()) => "Shutting down the device".to_string(),
+                        Ok(()) => tr("Shutting down the device").to_string(),
                         Err(e) => format!("Shut down failed: {e:#}"),
                     };
                     out.send(Msg::Log(msg));
@@ -3150,7 +3262,7 @@ impl App {
         });
     }
     fn toolbox_tab(&mut self, ui: &mut egui::Ui) {
-        page_title(ui, "Toolbox", "Useful tools for your device.");
+        page_title(ui, tr("Toolbox"), tr("Useful tools for your device."));
         let dev = self.device().cloned();
         let busy = self.busy();
         let normal = dev.as_ref().is_some_and(|d| d.mode == Mode::Normal);
@@ -3161,8 +3273,8 @@ impl App {
             if tool_tile(
                 ui,
                 "\u{e248}",
-                "Backup",
-                "Back up apps and data",
+                tr("Backup"),
+                tr("Back up apps and data"),
                 !busy && normal,
             ) {
                 if let Some(d) = dev.clone() {
@@ -3172,8 +3284,8 @@ impl App {
             if tool_tile(
                 ui,
                 "\u{e5d4}",
-                "Enter Recovery",
-                "Boot into recovery mode",
+                tr("Enter Recovery"),
+                tr("Boot into recovery mode"),
                 !busy && normal,
             ) {
                 if let Some(d) = dev.clone() {
@@ -3183,23 +3295,35 @@ impl App {
             if tool_tile(
                 ui,
                 "\u{e08a}",
-                "Exit Recovery",
-                "Reboot into iOS / iPadOS",
+                tr("Exit Recovery"),
+                tr("Reboot into iOS / iPadOS"),
                 !busy && in_recovery,
             ) {
                 self.start_exit_recovery();
             }
-            if tool_tile(ui, "\u{e256}", "Backups", "Open the backup folder", true) {
+            if tool_tile(
+                ui,
+                "\u{e256}",
+                tr("Backups"),
+                tr("Open the backup folder"),
+                true,
+            ) {
                 let dir = device::default_backup_dir();
                 let _ = std::fs::create_dir_all(&dir);
                 open_path(&dir);
             }
-            if tool_tile(ui, "\u{e20c}", "Firmware", "Open the firmware folder", true) {
+            if tool_tile(
+                ui,
+                "\u{e20c}",
+                tr("Firmware"),
+                tr("Open the firmware folder"),
+                true,
+            ) {
                 if let Ok(dir) = firmware::firmware_dir() {
                     open_path(&dir);
                 }
             }
-            if tool_tile(ui, "\u{e2f2}", "Log", "Show the activity log", true) {
+            if tool_tile(ui, "\u{e2f2}", tr("Log"), tr("Show the activity log"), true) {
                 self.show_log = true;
             }
             let checking = matches!(self.update, Some(UpdateState::Checking));
@@ -3207,8 +3331,8 @@ impl App {
                 && tool_tile(
                     ui,
                     "\u{e036}",
-                    "Updates",
-                    "Check for a new version",
+                    tr("Updates"),
+                    tr("Check for a new version"),
                     !checking,
                 )
             {
@@ -3218,8 +3342,8 @@ impl App {
             if tool_tile(
                 ui,
                 "\u{e3d0}",
-                "DFU Assistant",
-                "Timed guide into DFU mode",
+                tr("DFU Assistant"),
+                tr("Timed guide into DFU mode"),
                 true,
             ) {
                 self.open_dfu_assistant(None);
@@ -3227,8 +3351,8 @@ impl App {
             if tool_tile(
                 ui,
                 "\u{e0e6}",
-                "Recovery & DFU",
-                "Step-by-step guides",
+                tr("Recovery & DFU"),
+                tr("Step-by-step guides"),
                 true,
             ) {
                 self.tab = Tab::Flash;
@@ -3238,21 +3362,27 @@ impl App {
                 && tool_tile(
                     ui,
                     "\u{e956}",
-                    "Apple Drivers",
-                    "Classic iTunes USB drivers",
+                    tr("Apple Drivers"),
+                    tr("Classic iTunes USB drivers"),
                     !busy,
                 )
             {
                 self.open_drivers();
             }
-            if tool_tile(ui, icons::INFO, "About", "Version, license, MirraNET", true) {
+            if tool_tile(
+                ui,
+                icons::INFO,
+                tr("About"),
+                tr("Version, license, MirraNET"),
+                true,
+            ) {
                 self.show_about = true;
             }
             if tool_tile(
                 ui,
                 "\u{e270}",
-                "Settings",
-                "Auto-clean, updates, folders",
+                tr("Settings"),
+                tr("Auto-clean, updates, folders"),
                 true,
             ) {
                 self.show_settings = true;
@@ -3276,9 +3406,9 @@ impl App {
                         .strong()
                         .color(ORANGE),
                 );
-                ui.label("Firmware browsing and downloads work, but devices cannot be detected or flashed:");
+                ui.label(tr("Firmware browsing and downloads work, but devices cannot be detected or flashed:"));
                 ui.label(RichText::new(device::INSTALL_HINT).monospace());
-                if ui.button("Check again").clicked() {
+                if ui.button(tr("Check again")).clicked() {
                     self.missing_tools = device::missing_tools();
                     self.last_scan = None;
                 }
@@ -3288,17 +3418,17 @@ impl App {
 
     fn log_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_log;
-        egui::Window::new("Log")
+        egui::Window::new(tr("Log"))
             .open(&mut open)
             .default_size([760.0, 420.0])
             .resizable(true)
             .collapsible(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("Copy").clicked() {
+                    if ui.button(tr("Copy")).clicked() {
                         ui.ctx().copy_text(self.log.join("\n"));
                     }
-                    if ui.button("Clear").clicked() {
+                    if ui.button(tr("Clear")).clicked() {
                         self.log.clear();
                     }
                 });
@@ -3316,6 +3446,7 @@ impl App {
     }
 
     fn flash_dialog(&mut self, ctx: &egui::Context) {
+        let find_my = self.find_my.clone();
         let Some(req) = &mut self.pending_flash else {
             return;
         };
@@ -3325,36 +3456,64 @@ impl App {
             .frame(theme::surface_frame(Surface::Raised).inner_margin(22))
             .show(ctx, |ui| {
                 ui.set_width(440.0);
-                ui.heading("Flash firmware");
+                ui.heading(tr("Flash firmware"));
                 ui.add_space(8.0);
                 egui::Grid::new("flash_info").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                    ui.label(RichText::new("Device").weak());
+                    ui.label(RichText::new(tr("Device")).weak());
                     ui.label(format!("{} {} [{}]", req.device.kind(), req.device.product, req.device.mode));
                     ui.end_row();
-                    ui.label(RichText::new("Firmware").weak());
+                    ui.label(RichText::new(tr("Firmware")).weak());
                     ui.label(RichText::new(&req.label).strong());
                     ui.end_row();
-                    ui.label(RichText::new("Mode").weak());
-                    ui.label(if req.erase { "Erase (clean restore)" } else { "Keep data (update)" });
+                    ui.label(RichText::new(tr("Mode")).weak());
+                    ui.label(if req.erase { tr("Erase (clean restore)") } else { tr("Keep data (update)") });
                     ui.end_row();
                 });
+                if !req.others.is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(tr("Also flash these devices (one after another)")).strong());
+                    for (d, on) in &mut req.others {
+                        let name = format!(
+                            "{} {} - {}",
+                            d.kind(),
+                            d.product,
+                            d.serial.clone().unwrap_or_else(|| d.ecid.clone())
+                        );
+                        ui.checkbox(on, name);
+                    }
+                }
                 ui.add_space(10.0);
+                let find_my_on: Vec<String> = std::iter::once(&req.device)
+                    .chain(req.others.iter().filter(|(_, on)| *on).map(|(d, _)| d))
+                    .filter(|d| find_my.get(d.key()).copied().flatten() == Some(true))
+                    .map(|d| d.serial.clone().unwrap_or_else(|| d.kind().to_string()))
+                    .collect();
+                if req.erase && !find_my_on.is_empty() {
+                    ui.label(
+                        RichText::new(trf(
+                            "\u{e4e0} \"Find My\" is on ({}). After the restore the device can only be set up with the Apple ID and password of its owner. Turn it off in Settings first if the device is handed over.",
+                            &[&find_my_on.join(", ")],
+                        ))
+                        .color(RED),
+                    );
+                }
                 if req.erase {
                     ui.label(
                         RichText::new(
-                            "\u{e4e0} All data on the device will be deleted. Create a backup first and make sure you know \
-                             the Apple ID password (Activation Lock).",
+                            tr("\u{e4e0} All data on the device will be deleted. Create a backup first and make sure you know \
+                             the Apple ID password (Activation Lock)."),
                         )
                         .color(ORANGE),
                     );
                 } else {
-                    ui.label(RichText::new("Apps and data are kept. A backup is still recommended.").weak());
+                    ui.label(RichText::new(tr("Apps and data are kept. A backup is still recommended.")).weak());
                 }
-                ui.label(RichText::new("Do not disconnect the device until it has rebooted.").weak());
+                ui.label(RichText::new(tr("Do not disconnect the device until it has rebooted.")).weak());
                 if let Some(b) = req.device.battery.filter(|b| *b < 20) {
                     ui.label(
-                        RichText::new(format!(
-                            "\u{e4e0} Battery is at {b} %. Charge the device first for a reliable restore."
+                        RichText::new(trf(
+                            "\u{e4e0} Battery is at {} %. Charge the device first for a reliable restore.",
+                            &[&b],
                         ))
                         .color(ORANGE),
                     );
@@ -3362,8 +3521,8 @@ impl App {
                 if firmware::firmware_dir().is_ok_and(|d| firmware::is_cloud_synced(&d)) {
                     ui.label(
                         RichText::new(
-                            "\u{e4e0} The firmware folder is synced with OneDrive. Pause OneDrive or choose a local \
-                             folder in the settings if the restore fails.",
+                            tr("\u{e4e0} The firmware folder is synced with OneDrive. Pause OneDrive or choose a local \
+                             folder in the settings if the restore fails."),
                         )
                         .color(ORANGE)
                         .small(),
@@ -3371,10 +3530,10 @@ impl App {
                 }
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         action = Some(false);
                     }
-                    let txt = if req.erase { "Erase & flash" } else { "Update" };
+                    let txt = if req.erase { tr("Erase & flash") } else { tr("Update") };
                     if ui.add(theme::accent_button(txt, if req.erase { DANGER } else { ACCENT }, true)).clicked() {
                         action = Some(true);
                     }
@@ -3481,17 +3640,24 @@ impl eframe::App for App {
                     });
                 });
             }
-            Tab::Device | Tab::Toolbox => {
+            Tab::Device => {
+                egui::Panel::left("device_sidebar")
+                    .resizable(false)
+                    .show_separator_line(false)
+                    .exact_size(220.0)
+                    .frame(outer(10, 4, 4, 4))
+                    .show(ui, |ui| self.device_sidebar(ui));
+                egui::CentralPanel::no_frame().show(ui, |ui| {
+                    outer(4, 12, 4, 4).show(ui, |ui| {
+                        theme::surface_fill(ui, Surface::Layer, |ui| self.device_content(ui))
+                    });
+                });
+            }
+            Tab::Toolbox => {
                 egui::CentralPanel::no_frame().show(ui, |ui| {
                     outer(12, 12, 4, 4).show(ui, |ui| {
                         theme::surface_fill(ui, Surface::Layer, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                if self.tab == Tab::Device {
-                                    self.device_tab(ui);
-                                } else {
-                                    self.toolbox_tab(ui);
-                                }
-                            });
+                            egui::ScrollArea::vertical().show(ui, |ui| self.toolbox_tab(ui));
                         })
                     });
                 });
@@ -3505,6 +3671,8 @@ impl eframe::App for App {
         self.about_window(&ctx);
         self.drivers_window(&ctx);
         self.flash_dialog(&ctx);
+        self.backup_dialogs(&ctx);
+        self.apps_dialog(&ctx);
     }
 }
 
@@ -3743,7 +3911,11 @@ fn mode_badge(ui: &mut egui::Ui, mode: &Mode) {
         .corner_radius(10.0)
         .inner_margin(egui::Margin::symmetric(8, 2))
         .show(ui, |ui| {
-            ui.label(RichText::new(format!("● {mode} Mode")).color(color).small());
+            ui.label(
+                RichText::new(format!("● {}", trf("{} Mode", &[mode])))
+                    .color(color)
+                    .small(),
+            );
         });
 }
 
@@ -3751,6 +3923,128 @@ fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Restores one device, retrying after the typical connection losses.
+fn restore_device(
+    dev: Device,
+    ipsw: &Path,
+    erase: bool,
+    auto_retry: bool,
+    out: &Out,
+    prefix: &str,
+) -> Result<(), String> {
+    let attempts = if auto_retry { MAX_RESTORE_ATTEMPTS } else { 1 };
+    let mut dev = dev;
+    let mut attempt = 1;
+    loop {
+        if attempt > 1 {
+            out.send(Msg::Log(format!("--- Attempt {attempt} of {attempts} ---")));
+        }
+        out.send(Msg::JobStatus(if attempt > 1 {
+            format!("{prefix}Preparing device (attempt {attempt} of {attempts}) ...")
+        } else {
+            format!("{prefix}Preparing device ...")
+        }));
+        let cmd = device::restore_cmd(&dev, ipsw, erase, false).map_err(|e| format!("{e:#}"))?;
+        let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (line_out, collected) = (out.clone(), lines.clone());
+        // no device queries while idevicerestore talks to the device
+        let lock = device::exclusive();
+        let result = device::run_streaming(cmd, move |l| {
+            if let Ok(mut v) = collected.lock() {
+                v.push(l.clone());
+            }
+            line_out.send(Msg::Log(l));
+        });
+        drop(lock);
+        let lines = lines.lock().map(|v| v.clone()).unwrap_or_default();
+        if let Some(path) = write_restore_log(&lines) {
+            out.send(Msg::Log(format!("Restore log saved to {}", path.display())));
+        }
+
+        let Err(e) = result else {
+            return Ok(());
+        };
+        let detail = match last_error_line(&lines) {
+            Some(line) => format!("{line} ({e:#})"),
+            None => format!("{e:#}"),
+        };
+        let upload_failed = lines.iter().any(|l| l.contains("Unable to upload data"));
+        if attempt >= attempts || !retryable(&lines) || dev.ecid.is_empty() {
+            let mut msg = if attempt > 1 {
+                format!("{detail} - failed after {attempt} attempts")
+            } else {
+                detail
+            };
+            if upload_failed {
+                msg.push_str(
+                    ". The device does not accept data over USB. Close the Apple Devices app / iTunes, \
+                     force restart the device into recovery or DFU mode, use a USB port directly on \
+                     the computer and try again.",
+                );
+                if drivers::supported() {
+                    msg.push_str(
+                        " Newer iPhones often need the classic iTunes drivers for this: \
+                         Toolbox \u{2192} Apple Drivers installs them.",
+                    );
+                }
+            }
+            return Err(msg);
+        }
+        if upload_failed {
+            // A USB reset often clears a stuck recovery-mode connection.
+            out.send(Msg::Log(
+                "Upload failed - resetting the USB connection".into(),
+            ));
+            let _lock = device::exclusive();
+            device::reset_recovery_usb();
+            std::thread::sleep(Duration::from_secs(3));
+        }
+
+        // Typical failure: the connection to the device is lost when it
+        // switches into restore mode and it boots back. Wait until it is
+        // back and start over.
+        out.send(Msg::Log(format!(
+            "Attempt {attempt} failed: {detail}. Waiting for the device to reconnect ..."
+        )));
+        out.send(Msg::JobStatus(format!(
+            "{prefix}Waiting for the device to reconnect ..."
+        )));
+        let mut found = device::wait_for_device(&dev.ecid, Duration::from_secs(60));
+        if found.is_none() {
+            // A device that lost the connection in restore mode keeps
+            // showing the progress bar and never comes back on its own.
+            let steps = Family::from_product(&dev.product)
+                .map(|f| f.recovery_steps().join(" "))
+                .unwrap_or_else(|| tr("Force restart the device into recovery mode.").into());
+            out.send(Msg::Log(format!(
+                "The device did not come back by itself. Force restart it into recovery mode: {steps}"
+            )));
+            out.send(Msg::JobStatus(
+                tr("Force restart the device into recovery mode - Obsidia continues automatically")
+                    .into(),
+            ));
+            found = device::wait_for_device(&dev.ecid, Duration::from_secs(600));
+        }
+        match found {
+            Some(found) => {
+                out.send(Msg::Log(format!(
+                    "Device is back in {} mode, retrying in a few seconds",
+                    found.mode
+                )));
+                dev = found;
+                // give the device time to settle after reconnecting
+                std::thread::sleep(Duration::from_secs(5));
+            }
+            None => {
+                return Err(format!(
+                    "{detail} - the device did not reconnect within 10 minutes. Put it into recovery or DFU mode and try again."
+                ))
+            }
+        }
+        attempt += 1;
+    }
 }
 
 /// Extract a trailing percentage like "... 42.5%" from a progress line.
@@ -3817,7 +4111,7 @@ fn write_restore_log(lines: &[String]) -> Option<PathBuf> {
     Some(path)
 }
 
-fn steps(ui: &mut egui::Ui, steps: &[&str]) {
+fn steps(ui: &mut egui::Ui, steps: &[&'static str]) {
     for (i, step) in steps.iter().enumerate() {
         ui.horizontal_top(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
@@ -3830,7 +4124,7 @@ fn steps(ui: &mut egui::Ui, steps: &[&str]) {
                 egui::FontId::proportional(12.0),
                 ACCENT,
             );
-            ui.add(egui::Label::new(*step).wrap());
+            ui.add(egui::Label::new(tr(step)).wrap());
         });
         ui.add_space(4.0);
     }
@@ -3878,7 +4172,7 @@ fn steps_overview(ui: &mut egui::Ui, timeline: &[crate::guides::Phase], current:
             } else {
                 format!("{:.0} s", phase.secs)
             };
-            let text = format!("{}  ({duration})", phase.text);
+            let text = format!("{}  ({duration})", tr(phase.text));
             let text = if current == Some(i) {
                 RichText::new(text).strong()
             } else {
@@ -3897,7 +4191,7 @@ fn retryable(lines: &[String]) -> bool {
     let fatal = [
         "TSS server returned",
         "isn't eligible",
-        "not compatible",
+        tr("not compatible"),
         "No matching build identity",
         "checksum",
         "Unable to open ipsw",
@@ -3953,13 +4247,15 @@ fn project_card_content(ui: &mut egui::Ui) {
     {
         ui.horizontal(|ui| {
             ui.label(RichText::new(icons::SEAL_CHECK).color(GREEN).size(16.0));
-            ui.label(RichText::new("Open source").strong());
+            ui.label(RichText::new(tr("Open source")).strong());
         });
         ui.add(
             egui::Label::new(
-                RichText::new("Free software by the MirraNET organization, MIT licensed.")
-                    .small()
-                    .weak(),
+                RichText::new(tr(
+                    "Free software by the MirraNET organization, MIT licensed.",
+                ))
+                .small()
+                .weak(),
             )
             .wrap(),
         );
@@ -3967,7 +4263,7 @@ fn project_card_content(ui: &mut egui::Ui) {
         let width = ui.available_width();
         if ui
             .add(
-                egui::Button::new(format!("{}  View on GitHub", icons::GITHUB_LOGO))
+                egui::Button::new(format!("{}  {}", icons::GITHUB_LOGO, tr("View on GitHub")))
                     .min_size(egui::vec2(width, 28.0)),
             )
             .on_hover_text(GITHUB_URL)
@@ -3996,18 +4292,18 @@ fn header_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response
 
 fn battery_card(ui: &mut egui::Ui, battery: Option<&diagnostics::Battery>) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("\u{e0c0}  Battery").strong());
+        ui.label(RichText::new(tr("\u{e0c0}  Battery")).strong());
         if let Some(b) = battery {
             if b.charging == Some(true) {
-                ui.label(RichText::new("\u{e0ba} Charging").small().color(GREEN));
+                ui.label(RichText::new(tr("\u{e0ba} Charging")).small().color(GREEN));
             } else if b.external_power == Some(true) {
-                ui.label(RichText::new("Connected to power").small().weak());
+                ui.label(RichText::new(tr("Connected to power")).small().weak());
             }
         }
     });
     ui.add_space(8.0);
     let Some(b) = battery else {
-        ui.label(RichText::new("The device did not report battery details.").weak());
+        ui.label(RichText::new(tr("The device did not report battery details.")).weak());
         return;
     };
     if let Some(health) = b.health() {
@@ -4022,13 +4318,13 @@ fn battery_card(ui: &mut egui::Ui, battery: Option<&diagnostics::Battery>) {
             ui.label(theme::title(format!("{health:.0} %"), 30.0).color(color));
             ui.vertical(|ui| {
                 ui.add_space(6.0);
-                ui.label(RichText::new("Maximum capacity").weak());
+                ui.label(RichText::new(tr("Maximum capacity")).weak());
                 let verdict = if health >= 80.0 {
-                    "Good condition"
+                    tr("Good condition")
                 } else if health >= 70.0 {
-                    "Worn - replacement recommended soon"
+                    tr("Worn - replacement recommended soon")
                 } else {
-                    "Replacement recommended"
+                    tr("Replacement recommended")
                 };
                 ui.label(RichText::new(verdict).small().color(color));
             });
@@ -4050,48 +4346,47 @@ fn battery_card(ui: &mut egui::Ui, battery: Option<&diagnostics::Battery>) {
                 ui.end_row();
             };
             if let Some(c) = b.cycles {
-                row("Charge cycles", c.to_string());
+                row(tr("Charge cycles"), c.to_string());
             }
             match (b.full_capacity, b.design_capacity) {
-                (Some(f), Some(d)) => row("Capacity", format!("{f} of {d} mAh")),
-                (None, Some(d)) => row("Design capacity", format!("{d} mAh")),
+                (Some(f), Some(d)) => row(tr("Capacity"), trf("{} of {} mAh", &[&f, &d])),
+                (None, Some(d)) => row(tr("Design capacity"), format!("{d} mAh")),
                 _ => {}
             }
             if let Some(l) = b.level {
-                row("Charge level", format!("{l} %"));
+                row(tr("Charge level"), format!("{l} %"));
             }
             if let Some(t) = b.temperature {
-                row("Temperature", format!("{t:.1} °C"));
+                row(tr("Temperature"), format!("{t:.1} °C"));
             }
             if let Some(v) = b.voltage {
-                row("Voltage", format!("{v:.2} V"));
+                row(tr("Voltage"), format!("{v:.2} V"));
             }
             if let Some(sn) = &b.serial {
-                row("Battery serial", sn.clone());
+                row(tr("Battery serial"), sn.clone());
             }
         });
     ui.add_space(6.0);
     ui.label(
-        RichText::new(
+        RichText::new(tr(
             "Measured by the battery itself; the value in iOS Settings can differ slightly.",
-        )
+        ))
         .small()
         .weak(),
     );
 }
 
 fn hardware_card(ui: &mut egui::Ui, report: &Report) {
-    ui.label(RichText::new("\u{e610}  Hardware").strong());
+    ui.label(RichText::new(tr("\u{e610}  Hardware")).strong());
     ui.add_space(8.0);
     if let (Some(total), Some(free)) = (report.storage_total, report.storage_free) {
         let used = total.saturating_sub(free);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Storage").weak());
+            ui.label(RichText::new(tr("Storage")).weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(format!(
+                ui.label(trf(
                     "{} used of {}",
-                    HumanBytes(used),
-                    HumanBytes(total)
+                    &[&HumanBytes(used), &HumanBytes(total)],
                 ));
             });
         });
@@ -4103,7 +4398,7 @@ fn hardware_card(ui: &mut egui::Ui, report: &Report) {
         .spacing([24.0, 6.0])
         .show(ui, |ui| {
             for (k, v) in &report.hardware {
-                ui.label(RichText::new(*k).weak());
+                ui.label(RichText::new(tr(k)).weak());
                 ui.label(v);
                 ui.end_row();
             }

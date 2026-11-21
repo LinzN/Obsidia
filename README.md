@@ -39,7 +39,15 @@ from [ipsw.me](https://ipsw.me).
   IMEI, model number, activation state, storage; export as a text report, restart or shut
   down the device
 - DFU assistant: a timer walks you through the button sequence and detects DFU mode live
-- Backup, enter / exit recovery mode
+- Backups: back up, restore (also onto another device), delete, turn backup encryption on or off
+- Flash several connected devices of the same model one after another
+- Apps: list installed apps with size, uninstall, install `.ipa` files
+- Photos & media: copy the camera roll, take screenshots (up to iOS 16), copy crash reports
+- Console: live system log of the device with filter, pause and export
+- Warning before erasing a device with "Find My" turned on (Activation Lock)
+- Optional automatic download of the newest firmware for connected devices
+- English and German user interface (follows the system language, can be changed in the settings)
+- Enter / exit recovery mode
 - Live log with progress of every operation
 
 > Apple only allows installing firmwares that are **currently signed**.
@@ -93,7 +101,9 @@ not notarized yet: on first launch right-click it and choose *Open*.
 |---|---|
 | `C:\Obsidia\Firmware` (Windows), `Documents/Obsidia/Firmware` (Linux, macOS) | Downloaded IPSW files (reused while signed) |
 | `Documents/Obsidia/Backups` | Device backups |
-| `Documents/Obsidia/Logs` | Log of every restore |
+| `Documents/Obsidia/Logs` | Log of every restore, saved device logs |
+| `Documents/Obsidia/Reports` | Exported device reports |
+| `Documents/Obsidia/Photos`, `Screenshots`, `CrashReports` | Copied from the device |
 
 On Windows the firmware folder is shared by all users of the computer, so a firmware file
 is downloaded only once. The installer creates it with write access for all users; it is

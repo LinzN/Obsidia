@@ -5,6 +5,8 @@
 // no console window for release builds on windows
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod apps;
+mod backup;
 mod cli;
 mod device;
 mod diagnostics;
@@ -12,7 +14,9 @@ mod drivers;
 mod firmware;
 mod gui;
 mod guides;
+mod i18n;
 mod icons;
+mod media;
 mod settings;
 mod theme;
 mod updater;

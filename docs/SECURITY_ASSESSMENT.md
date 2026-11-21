@@ -91,6 +91,9 @@ and macOS they come from the system package manager.
 | Firmware files (`.ipsw`) and their metadata (`.ipsw.json`) | `C:\Obsidia\Firmware` on Windows (shared by all users), `Documents/Obsidia/Firmware` on Linux and macOS | No | Public (Apple software) |
 | Device backups | `Documents/Obsidia/Backups` | No | **Confidential** – may contain personal and business data |
 | Restore logs | `Documents/Obsidia/Logs` | No | Internal – contain device identifiers (ECID, serial number) |
+| Saved device logs (console) | `Documents/Obsidia/Logs` | No | **Confidential** – may contain app and user activity |
+| Device reports (battery, IMEI, serial number) | `Documents/Obsidia/Reports` | No | Internal – device identifiers |
+| Exported photos, screenshots, crash reports | `Documents/Obsidia/Photos`, `Screenshots`, `CrashReports` | No | **Confidential** – personal data from the device |
 | Activity log | Memory only, can be copied by the user | No | Internal |
 | Settings (auto-clean, update check) | `obsidia/settings.json` in the user config folder | No | Internal |
 

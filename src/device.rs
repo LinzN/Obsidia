@@ -195,6 +195,49 @@ pub fn run_with_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<
     })
 }
 
+/// Runs a tool and returns whether it succeeded together with everything it
+/// printed (stdout and stderr), so error messages can be shown.
+pub fn run_full(name: &str, args: &[&str], timeout: Duration) -> Result<(bool, String)> {
+    use std::io::Read;
+
+    let mut child = tool_cmd(name)?
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| spawn_error(name, e))?;
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+    let start = Instant::now();
+    let ok = loop {
+        if let Some(status) = child.try_wait()? {
+            break status.success();
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut text = String::from_utf8_lossy(&out_reader.join().unwrap_or_default()).into_owned();
+    text.push_str(&String::from_utf8_lossy(
+        &err_reader.join().unwrap_or_default(),
+    ));
+    Ok((ok, text))
+}
+
 /// Keeps queries away from the device while a restore or backup runs,
 /// otherwise they compete for the USB connection. Queries can run in
 /// parallel with each other.

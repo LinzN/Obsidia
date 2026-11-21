@@ -15,6 +15,11 @@ pub struct Settings {
     pub auto_retry: bool,
     /// Custom firmware folder; `None` = Documents/Obsidia/Firmware.
     pub firmware_dir: Option<std::path::PathBuf>,
+    /// Download the newest signed firmware for connected devices in the
+    /// background, so it is ready when needed.
+    pub auto_download: bool,
+    /// "en", "de" or empty for the system language.
+    pub language: String,
 }
 
 impl Default for Settings {
@@ -24,6 +29,8 @@ impl Default for Settings {
             check_updates: true,
             auto_retry: true,
             firmware_dir: None,
+            auto_download: false,
+            language: String::new(),
         }
     }
 }

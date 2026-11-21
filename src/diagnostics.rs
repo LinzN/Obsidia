@@ -297,13 +297,39 @@ fn now() -> String {
 
 pub fn restart(udid: &str) -> Result<()> {
     let _lock = device::shared();
-    device::run("idevicediagnostics", &["-u", udid, "restart"])?;
+    let (ok, out) = device::run_full(
+        "idevicediagnostics",
+        &["-u", udid, "restart"],
+        std::time::Duration::from_secs(30),
+    )?;
+    if !ok {
+        bail!(
+            "{}",
+            out.lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("failed")
+                .trim()
+        );
+    }
     Ok(())
 }
 
 pub fn shutdown(udid: &str) -> Result<()> {
     let _lock = device::shared();
-    device::run("idevicediagnostics", &["-u", udid, "shutdown"])?;
+    let (ok, out) = device::run_full(
+        "idevicediagnostics",
+        &["-u", udid, "shutdown"],
+        std::time::Duration::from_secs(30),
+    )?;
+    if !ok {
+        bail!(
+            "{}",
+            out.lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("failed")
+                .trim()
+        );
+    }
     Ok(())
 }
 

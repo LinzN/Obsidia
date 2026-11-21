@@ -13,7 +13,7 @@ exceptions:
   This is required by Apple to install firmware.
 
 Obsidia has no telemetry, analytics or crash reporting and no user accounts. Firmware, backups
-and logs stay on the computer.
+and logs as well as photos, app lists, device reports and system logs read from a device stay on the computer.
 
 Contact: niklas.linz@mirranet.de ([MirraNET](https://mirranet.de))
 
