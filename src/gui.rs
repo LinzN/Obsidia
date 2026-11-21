@@ -1,6 +1,7 @@
 //! Desktop GUI built with egui.
 
 use crate::device::{self, Device, Mode};
+use crate::diagnostics::{self, Report};
 use crate::drivers;
 use crate::firmware::{self, CatalogEntry, DeviceInfo, Firmware, Progress};
 use crate::guides::Family;
@@ -68,6 +69,7 @@ enum Msg {
     UpdateDownloaded(Result<PathBuf, String>),
     DriverStatus(drivers::Status),
     LocalFirmwareChanged,
+    Diagnostics(String, Result<Report, String>),
 }
 
 /// Sender that also wakes up the UI.
@@ -139,6 +141,13 @@ enum UpdateState {
         cancel: Arc<AtomicBool>,
     },
     Failed(Option<Update>, String),
+}
+
+/// Battery and hardware details of one device.
+struct DiagState {
+    report: Option<Result<Report, String>>,
+    loading: bool,
+    fetched: Instant,
 }
 
 /// Window for installing the classic Apple drivers (Windows).
@@ -251,6 +260,7 @@ struct App {
     guide_family: Option<Family>,
     dfu: Option<DfuAssistant>,
     drivers: Option<DriverPanel>,
+    diag: HashMap<String, DiagState>,
 }
 
 impl App {
@@ -299,6 +309,7 @@ impl App {
             guide_family: None,
             dfu: None,
             drivers: None,
+            diag: HashMap::new(),
         };
         if updater::auto_check_enabled() && app.settings.check_updates {
             app.check_for_updates(false);
@@ -533,6 +544,13 @@ impl App {
                     });
                 }
                 Msg::LocalFirmwareChanged => self.refresh_local_files(),
+                Msg::Diagnostics(key, result) => {
+                    if let Some(state) = self.diag.get_mut(&key) {
+                        state.loading = false;
+                        state.fetched = Instant::now();
+                        state.report = Some(result);
+                    }
+                }
                 Msg::DriverStatus(status) => {
                     if let Some(panel) = &mut self.drivers {
                         panel.remove_store = status.store_app;
@@ -2889,6 +2907,17 @@ impl App {
             ui.add_space(8.0);
         }
 
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.device_overview(ui, &dev, &model);
+                ui.add_space(18.0);
+                self.diagnostics_section(ui, &dev, &model);
+            });
+    }
+
+    fn device_overview(&mut self, ui: &mut egui::Ui, dev: &Device, model: &str) {
+        let dev = dev.clone();
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(260.0);
@@ -2899,7 +2928,7 @@ impl App {
             });
             ui.add_space(20.0);
             ui.vertical(|ui| {
-                ui.label(theme::title(&model, 26.0));
+                ui.label(theme::title(model, 26.0));
                 if dev.name != model && dev.name != "-" {
                     ui.label(RichText::new(&dev.name).weak().size(15.0));
                 }
@@ -2988,6 +3017,138 @@ impl App {
         });
     }
 
+    fn diagnostics_section(&mut self, ui: &mut egui::Ui, dev: &Device, model: &str) {
+        ui.label(theme::title("Battery & diagnostics", 18.0));
+        ui.add_space(6.0);
+        if dev.mode != Mode::Normal {
+            ui.label(
+                RichText::new(
+                    "Available when the device is started normally and trusts this computer.",
+                )
+                .weak(),
+            );
+            return;
+        }
+        let key = dev.key().to_string();
+        let busy = self.busy();
+        let stale = self
+            .diag
+            .get(&key)
+            .is_none_or(|d| !d.loading && d.fetched.elapsed() > Duration::from_secs(60));
+        if stale && !busy {
+            self.load_diagnostics(dev);
+        }
+        let Some(state) = self.diag.get(&key) else {
+            return;
+        };
+        let loading = state.loading;
+        let report = match &state.report {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Reading battery and hardware details ...").weak());
+                });
+                return;
+            }
+            Some(Err(e)) => {
+                ui.label(RichText::new(format!("\u{e4e0}  {e}")).color(ORANGE));
+                if ui
+                    .add_enabled(!busy, egui::Button::new("\u{e094}  Try again"))
+                    .clicked()
+                {
+                    self.load_diagnostics(dev);
+                }
+                return;
+            }
+            Some(Ok(report)) => report.clone(),
+        };
+
+        let width = ui.available_width();
+        let card_w = ((width - 16.0) / 2.0).clamp(300.0, 520.0);
+        ui.horizontal_top(|ui| {
+            theme::surface(ui, Surface::Card, |ui| {
+                ui.set_width(card_w);
+                battery_card(ui, report.battery.as_ref());
+            });
+            ui.add_space(16.0);
+            theme::surface(ui, Surface::Card, |ui| {
+                ui.set_width(card_w);
+                hardware_card(ui, &report);
+            });
+        });
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!busy && !loading, egui::Button::new("\u{e094}  Refresh"))
+                .clicked()
+            {
+                self.load_diagnostics(dev);
+            }
+            if loading {
+                ui.spinner();
+            }
+            if ui.button("\u{eaf0}  Export report").clicked() {
+                match diagnostics::save_report(dev, model, &report) {
+                    Ok(path) => {
+                        self.log
+                            .push(format!("Device report saved to {}", path.display()));
+                        self.notice = Some((format!("Report saved to {}", path.display()), false));
+                        if let Some(dir) = path.parent() {
+                            open_path(dir);
+                        }
+                    }
+                    Err(e) => {
+                        self.notice = Some((format!("Could not save the report: {e:#}"), true))
+                    }
+                }
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("\u{e036}  Restart device"))
+                .clicked()
+            {
+                let udid = dev.udid.clone();
+                self.spawn(move |out| {
+                    let msg = match diagnostics::restart(&udid) {
+                        Ok(()) => "Restarting the device".to_string(),
+                        Err(e) => format!("Restart failed: {e:#}"),
+                    };
+                    out.send(Msg::Log(msg));
+                });
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("\u{e3da}  Shut down"))
+                .clicked()
+            {
+                let udid = dev.udid.clone();
+                self.spawn(move |out| {
+                    let msg = match diagnostics::shutdown(&udid) {
+                        Ok(()) => "Shutting down the device".to_string(),
+                        Err(e) => format!("Shut down failed: {e:#}"),
+                    };
+                    out.send(Msg::Log(msg));
+                });
+            }
+        });
+    }
+
+    fn load_diagnostics(&mut self, dev: &Device) {
+        let key = dev.key().to_string();
+        let state = self.diag.entry(key.clone()).or_insert(DiagState {
+            report: None,
+            loading: false,
+            fetched: Instant::now(),
+        });
+        if state.loading {
+            return;
+        }
+        state.loading = true;
+        let dev = dev.clone();
+        self.spawn(move |out| {
+            let result = diagnostics::read(&dev).map_err(|e| format!("{e:#}"));
+            out.send(Msg::Diagnostics(key, result));
+        });
+    }
     fn toolbox_tab(&mut self, ui: &mut egui::Ui) {
         page_title(ui, "Toolbox", "Useful tools for your device.");
         let dev = self.device().cloned();
@@ -3831,4 +3992,120 @@ fn project_card_content(ui: &mut egui::Ui) {
 fn header_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
     ui.add(egui::Button::new(RichText::new(icon).size(16.0)).min_size(egui::vec2(34.0, 32.0)))
         .on_hover_text(tooltip)
+}
+
+fn battery_card(ui: &mut egui::Ui, battery: Option<&diagnostics::Battery>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("\u{e0c0}  Battery").strong());
+        if let Some(b) = battery {
+            if b.charging == Some(true) {
+                ui.label(RichText::new("\u{e0ba} Charging").small().color(GREEN));
+            } else if b.external_power == Some(true) {
+                ui.label(RichText::new("Connected to power").small().weak());
+            }
+        }
+    });
+    ui.add_space(8.0);
+    let Some(b) = battery else {
+        ui.label(RichText::new("The device did not report battery details.").weak());
+        return;
+    };
+    if let Some(health) = b.health() {
+        let color = if health >= 80.0 {
+            GREEN
+        } else if health >= 70.0 {
+            ORANGE
+        } else {
+            RED
+        };
+        ui.horizontal(|ui| {
+            ui.label(theme::title(format!("{health:.0} %"), 30.0).color(color));
+            ui.vertical(|ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Maximum capacity").weak());
+                let verdict = if health >= 80.0 {
+                    "Good condition"
+                } else if health >= 70.0 {
+                    "Worn - replacement recommended soon"
+                } else {
+                    "Replacement recommended"
+                };
+                ui.label(RichText::new(verdict).small().color(color));
+            });
+        });
+        ui.add(
+            egui::ProgressBar::new(health / 100.0)
+                .desired_height(6.0)
+                .fill(color),
+        );
+        ui.add_space(8.0);
+    }
+    egui::Grid::new("battery_grid")
+        .num_columns(2)
+        .spacing([24.0, 6.0])
+        .show(ui, |ui| {
+            let mut row = |k: &str, v: String| {
+                ui.label(RichText::new(k).weak());
+                ui.label(v);
+                ui.end_row();
+            };
+            if let Some(c) = b.cycles {
+                row("Charge cycles", c.to_string());
+            }
+            match (b.full_capacity, b.design_capacity) {
+                (Some(f), Some(d)) => row("Capacity", format!("{f} of {d} mAh")),
+                (None, Some(d)) => row("Design capacity", format!("{d} mAh")),
+                _ => {}
+            }
+            if let Some(l) = b.level {
+                row("Charge level", format!("{l} %"));
+            }
+            if let Some(t) = b.temperature {
+                row("Temperature", format!("{t:.1} °C"));
+            }
+            if let Some(v) = b.voltage {
+                row("Voltage", format!("{v:.2} V"));
+            }
+            if let Some(sn) = &b.serial {
+                row("Battery serial", sn.clone());
+            }
+        });
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(
+            "Measured by the battery itself; the value in iOS Settings can differ slightly.",
+        )
+        .small()
+        .weak(),
+    );
+}
+
+fn hardware_card(ui: &mut egui::Ui, report: &Report) {
+    ui.label(RichText::new("\u{e610}  Hardware").strong());
+    ui.add_space(8.0);
+    if let (Some(total), Some(free)) = (report.storage_total, report.storage_free) {
+        let used = total.saturating_sub(free);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Storage").weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(format!(
+                    "{} used of {}",
+                    HumanBytes(used),
+                    HumanBytes(total)
+                ));
+            });
+        });
+        ui.add(egui::ProgressBar::new(used as f32 / total.max(1) as f32).desired_height(6.0));
+        ui.add_space(8.0);
+    }
+    egui::Grid::new("hardware_grid")
+        .num_columns(2)
+        .spacing([24.0, 6.0])
+        .show(ui, |ui| {
+            for (k, v) in &report.hardware {
+                ui.label(RichText::new(*k).weak());
+                ui.label(v);
+                ui.end_row();
+            }
+        });
 }

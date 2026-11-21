@@ -76,7 +76,7 @@ jobs:
           set -e
           mkdir -p dist/tools
           cp target/release/obsidia.exe dist/
-          for exe in idevice_id ideviceinfo ideviceenterrecovery idevicebackup2 irecovery idevicerestore; do
+          for exe in idevice_id ideviceinfo ideviceenterrecovery idevicebackup2 idevicediagnostics irecovery idevicerestore; do
             # some packages ship the tool with a target prefix (x86_64-w64-mingw32-idevicerestore.exe)
             path=$(find /ucrt64/bin -iname "$exe.exe" | head -n1)
             [ -z "$path" ] && path=$(find /ucrt64/bin -iname "*-$exe.exe" | head -n1)

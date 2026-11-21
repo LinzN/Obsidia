@@ -206,7 +206,7 @@ pub fn exclusive() -> std::sync::RwLockWriteGuard<'static, ()> {
 }
 
 /// Shared access for short queries.
-fn shared() -> std::sync::RwLockReadGuard<'static, ()> {
+pub(crate) fn shared() -> std::sync::RwLockReadGuard<'static, ()> {
     DEVICE_LOCK.read().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -266,7 +266,7 @@ impl Device {
     }
 }
 
-fn parse_kv(text: &str) -> HashMap<String, String> {
+pub(crate) fn parse_kv(text: &str) -> HashMap<String, String> {
     text.lines()
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))

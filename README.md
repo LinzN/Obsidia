@@ -35,6 +35,9 @@ from [ipsw.me](https://ipsw.me).
 - Apple drivers (Windows): installs the classic USB drivers from Apple's iTunes installer
   (signature checked, without iTunes itself). They fix aborted uploads in recovery mode that
   are common with the Microsoft Store drivers on iPhone 14 and newer
+- Battery & diagnostics: battery health (maximum capacity, charge cycles, temperature),
+  IMEI, model number, activation state, storage; export as a text report, restart or shut
+  down the device
 - DFU assistant: a timer walks you through the button sequence and detects DFU mode live
 - Backup, enter / exit recovery mode
 - Live log with progress of every operation
