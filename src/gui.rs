@@ -67,6 +67,7 @@ enum Msg {
     UpdateProgress(u64, u64),
     UpdateDownloaded(Result<PathBuf, String>),
     DriverStatus(drivers::Status),
+    LocalFirmwareChanged,
 }
 
 /// Sender that also wakes up the UI.
@@ -303,6 +304,16 @@ impl App {
             app.check_for_updates(false);
         }
         app.refresh_local_files();
+        app.spawn(|out| {
+            let moved = firmware::migrate_user_firmware();
+            if moved > 0 {
+                out.send(Msg::Log(format!(
+                    "Moved {moved} firmware file(s) to {}",
+                    firmware::default_firmware_dir().display()
+                )));
+                out.send(Msg::LocalFirmwareChanged);
+            }
+        });
         app
     }
 
@@ -521,6 +532,7 @@ impl App {
                         }
                     });
                 }
+                Msg::LocalFirmwareChanged => self.refresh_local_files(),
                 Msg::DriverStatus(status) => {
                     if let Some(panel) = &mut self.drivers {
                         panel.remove_store = status.store_app;

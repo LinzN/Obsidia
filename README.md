@@ -79,13 +79,16 @@ not notarized yet: on first launch right-click it and choose *Open*.
 
 ## Files
 
-Everything Obsidia stores lives in `Documents/Obsidia`:
-
 | Folder | Content |
 |---|---|
-| `Firmware` | Downloaded IPSW files (reused while signed) |
-| `Backups` | Device backups |
-| `Logs` | Log of every restore |
+| `C:\Obsidia\Firmware` (Windows), `Documents/Obsidia/Firmware` (Linux, macOS) | Downloaded IPSW files (reused while signed) |
+| `Documents/Obsidia/Backups` | Device backups |
+| `Documents/Obsidia/Logs` | Log of every restore |
+
+On Windows the firmware folder is shared by all users of the computer, so a firmware file
+is downloaded only once. The installer creates it with write access for all users; it is
+kept when Obsidia is uninstalled. Firmware from the per-user folder of earlier versions is
+moved there on start-up. The folder can be changed in the settings.
 
 ## Updates
 

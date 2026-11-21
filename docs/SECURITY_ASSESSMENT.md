@@ -88,13 +88,15 @@ and macOS they come from the system package manager.
 |---|---|---|---|
 | Device model (product type, e.g. `iPhone14,5`) | Memory only | Yes – to ipsw.me to list firmware | Public |
 | UDID, ECID, serial number, device name, OS version, battery level, capacity | Memory, shown in the UI and log window | ECID and related identifiers are sent to Apple during a restore (required by Apple's restore process) | Internal / personal data if the device is assigned to a person |
-| Firmware files (`.ipsw`) and their metadata (`.ipsw.json`) | `Documents/Obsidia/Firmware` | No | Public (Apple software) |
+| Firmware files (`.ipsw`) and their metadata (`.ipsw.json`) | `C:\Obsidia\Firmware` on Windows (shared by all users), `Documents/Obsidia/Firmware` on Linux and macOS | No | Public (Apple software) |
 | Device backups | `Documents/Obsidia/Backups` | No | **Confidential** – may contain personal and business data |
 | Restore logs | `Documents/Obsidia/Logs` | No | Internal – contain device identifiers (ECID, serial number) |
 | Activity log | Memory only, can be copied by the user | No | Internal |
 | Settings (auto-clean, update check) | `obsidia/settings.json` in the user config folder | No | Internal |
 
-Storage locations: all user data lives in `Documents/Obsidia` (`%USERPROFILE%\Documents\Obsidia`
+Storage locations: firmware is kept in `C:\Obsidia\Firmware` on Windows, a folder the installer
+creates with modify rights for the local *Users* group so that all users share the downloads
+(firmware files are public Apple software). All other user data lives in `Documents/Obsidia` (`%USERPROFILE%\Documents\Obsidia`
 on Windows, `~/Documents/Obsidia` on Linux and macOS). Update installers are kept in the
 user cache folder (`%LOCALAPPDATA%\obsidia\updates`, `~/.cache/obsidia/updates`,
 `~/Library/Caches/obsidia/updates`). Settings are stored in `%APPDATA%\obsidia`,

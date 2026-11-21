@@ -34,6 +34,13 @@
       </Directory>
     </StandardDirectory>
 
+    <!-- Firmware shared by all users of the computer: C:\Obsidia\Firmware -->
+    <StandardDirectory Id="WindowsVolume">
+      <Directory Id="DATAFOLDER" Name="Obsidia">
+        <Directory Id="FIRMWAREFOLDER" Name="Firmware" />
+      </Directory>
+    </StandardDirectory>
+
     <Feature Id="Main" Title="Obsidia" Level="1">
       <Component Directory="INSTALLFOLDER">
         <File Source="$(Root)\dist\obsidia.exe" KeyPath="yes" />
@@ -44,6 +51,18 @@
       <Files Directory="TOOLSFOLDER" Include="$(Root)\dist\tools\**" />
       <Files Directory="ETCFOLDER" Include="$(Root)\dist\etc\**" />
 
+      <!-- Everyone may add and remove firmware. The folder and downloaded files
+           stay when Obsidia is uninstalled. -->
+      <Component Id="SharedFirmwareFolder" Directory="DATAFOLDER" Permanent="yes">
+        <CreateFolder>
+          <PermissionEx Sddl="D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)(A;OICI;FA;;;CO)" />
+        </CreateFolder>
+        <CreateFolder Directory="FIRMWAREFOLDER">
+          <PermissionEx Sddl="D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)(A;OICI;FA;;;CO)" />
+        </CreateFolder>
+        <RegistryValue Root="HKLM" Key="Software\MirraNET\Obsidia" Name="FirmwareFolder"
+                       Type="string" Value="[FIRMWAREFOLDER]" KeyPath="yes" />
+      </Component>
       <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder">
         <Shortcut Name="Obsidia" Description="iPhone &amp; iPad firmware tool"
                   Target="[INSTALLFOLDER]obsidia.exe" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />

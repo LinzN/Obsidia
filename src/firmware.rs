@@ -124,7 +124,7 @@ pub fn resolve_firmware(product: &str, version: Option<&str>) -> Result<Firmware
     }
 }
 
-/// `Documents/Obsidia` - firmware, backups and logs live here.
+/// `Documents/Obsidia` - backups and logs live here (and firmware outside Windows).
 pub fn data_dir() -> PathBuf {
     dirs::document_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join("Documents")))
@@ -141,8 +141,75 @@ pub fn set_firmware_dir(dir: Option<PathBuf>) {
     }
 }
 
-pub fn default_firmware_dir() -> PathBuf {
+/// Per-user firmware folder: the default on Linux and macOS, and the
+/// fallback on Windows if the shared folder can't be written.
+fn user_firmware_dir() -> PathBuf {
     data_dir().join("Firmware")
+}
+
+/// `C:\Obsidia\Firmware` on Windows, shared by all users of the computer.
+/// The installer creates it with write access for all users.
+#[cfg(windows)]
+fn shared_firmware_dir() -> PathBuf {
+    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    PathBuf::from(format!("{drive}\\"))
+        .join("Obsidia")
+        .join("Firmware")
+}
+
+#[cfg(windows)]
+fn writable(dir: &Path) -> bool {
+    if fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".write-test-{}", std::process::id()));
+    let ok = File::create(&probe).is_ok();
+    let _ = fs::remove_file(&probe);
+    ok
+}
+
+pub fn default_firmware_dir() -> PathBuf {
+    static RESOLVED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            #[cfg(windows)]
+            {
+                let shared = shared_firmware_dir();
+                if writable(&shared) {
+                    return shared;
+                }
+            }
+            user_firmware_dir()
+        })
+        .clone()
+}
+
+/// Moves firmware from the per-user folder of earlier versions into the
+/// shared folder. Only renames on the same drive, nothing is copied.
+pub fn migrate_user_firmware() -> usize {
+    let target = default_firmware_dir();
+    let old = user_firmware_dir();
+    if target == old {
+        return 0;
+    }
+    let Ok(entries) = fs::read_dir(&old) else {
+        return 0;
+    };
+    let mut moved = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(String::from) else {
+            continue;
+        };
+        if !(name.ends_with(".ipsw") || name.ends_with(".ipsw.json")) || !path.is_file() {
+            continue;
+        }
+        let dest = target.join(&name);
+        if !dest.exists() && fs::rename(&path, &dest).is_ok() && name.ends_with(".ipsw") {
+            moved += 1;
+        }
+    }
+    moved
 }
 
 /// True if the path is inside a OneDrive folder (synced to the cloud).
