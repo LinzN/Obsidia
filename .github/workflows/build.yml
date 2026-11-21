@@ -139,7 +139,7 @@ jobs:
           & $makepri new /pr $layout /cf priconfig.xml /of "$layout\resources.pri" /mn "$layout\AppxManifest.xml" /o
           if ($LASTEXITCODE -ne 0) { throw "makepri new failed" }
           New-Item -ItemType Directory -Force msix | Out-Null
-          & $makeappx.FullName pack /d $layout /p "msix\obsidia-$version-x64.msix" /o
+          & $makeappx.FullName pack /d $layout /p "msix\obsidia-$version-x64-store.msix" /o
           if ($LASTEXITCODE -ne 0) { throw "makeappx failed" }
 
       - uses: actions/upload-artifact@v4
@@ -205,10 +205,10 @@ jobs:
     needs: [windows, linux, macos]
     runs-on: ubuntu-latest
     steps:
-      # only the installers, not the Store package
+      # installers plus the Store package (for upload to Partner Center)
       - uses: actions/download-artifact@v4
         with:
-          pattern: "{windows,linux,macos}"
+          pattern: "{windows,linux,macos,msix-store}"
           path: dist
           merge-multiple: true
 
