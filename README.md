@@ -32,6 +32,9 @@ from [ipsw.me](https://ipsw.me).
 - Drag & drop a local `.ipsw` onto the window to flash it
 - Downloaded firmware is reused while Apple signs it; optional auto-clean removes expired files
 - Step-by-step guides for recovery and DFU mode for every iPhone and iPad generation
+- Apple drivers (Windows): installs the classic USB drivers from Apple's iTunes installer
+  (signature checked, without iTunes itself). They fix aborted uploads in recovery mode that
+  are common with the Microsoft Store drivers on iPhone 14 and newer
 - DFU assistant: a timer walks you through the button sequence and detects DFU mode live
 - Backup, enter / exit recovery mode
 - Live log with progress of every operation

@@ -1,6 +1,7 @@
 //! Desktop GUI built with egui.
 
 use crate::device::{self, Device, Mode};
+use crate::drivers;
 use crate::firmware::{self, CatalogEntry, DeviceInfo, Firmware, Progress};
 use crate::guides::Family;
 use crate::icons;
@@ -65,6 +66,7 @@ enum Msg {
     UpdateChecked(Result<Option<Update>, String>, bool),
     UpdateProgress(u64, u64),
     UpdateDownloaded(Result<PathBuf, String>),
+    DriverStatus(drivers::Status),
 }
 
 /// Sender that also wakes up the UI.
@@ -136,6 +138,12 @@ enum UpdateState {
         cancel: Arc<AtomicBool>,
     },
     Failed(Option<Update>, String),
+}
+
+/// Window for installing the classic Apple drivers (Windows).
+struct DriverPanel {
+    status: Option<drivers::Status>,
+    remove_store: bool,
 }
 
 struct DfuAssistant {
@@ -241,6 +249,7 @@ struct App {
     show_about: bool,
     guide_family: Option<Family>,
     dfu: Option<DfuAssistant>,
+    drivers: Option<DriverPanel>,
 }
 
 impl App {
@@ -288,6 +297,7 @@ impl App {
             show_about: false,
             guide_family: None,
             dfu: None,
+            drivers: None,
         };
         if updater::auto_check_enabled() && app.settings.check_updates {
             app.check_for_updates(false);
@@ -510,6 +520,12 @@ impl App {
                             UpdateState::Failed(None, e)
                         }
                     });
+                }
+                Msg::DriverStatus(status) => {
+                    if let Some(panel) = &mut self.drivers {
+                        panel.remove_store = status.store_app;
+                        panel.status = Some(status);
+                    }
                 }
                 Msg::UpdateProgress(d, t) => {
                     if let Some(UpdateState::Downloading { done, total, .. }) = &mut self.update {
@@ -768,6 +784,12 @@ impl App {
                              force restart the device into recovery or DFU mode, use a USB port directly on \
                              the computer and try again.",
                         );
+                        if drivers::supported() {
+                            msg.push_str(
+                                " Newer iPhones often need the classic iTunes drivers for this: \
+                                 Toolbox \u{2192} Apple Drivers installs them.",
+                            );
+                        }
                     }
                     return Err(msg);
                 }
@@ -1945,6 +1967,155 @@ impl App {
         self.show_about = open;
     }
 
+    fn open_drivers(&mut self) {
+        self.drivers = Some(DriverPanel {
+            status: None,
+            remove_store: true,
+        });
+        self.spawn(|out| out.send(Msg::DriverStatus(drivers::status())));
+    }
+
+    fn start_driver_install(&mut self, remove_store: bool) {
+        self.start_job(JobKind::Other, "Install Apple drivers", move |out| {
+            let fail = |e: anyhow::Error| format!("{e:#}");
+            if remove_store {
+                out.send(Msg::JobStatus("Removing the Apple Devices app ...".into()));
+                out.send(Msg::Log(
+                    "Removing Store packages AppleInc.AppleDevices / AppleInc.iTunes".into(),
+                ));
+                drivers::remove_store_apps().map_err(fail)?;
+            }
+            out.send(Msg::JobStatus(
+                "Downloading the iTunes installer from apple.com ...".into(),
+            ));
+            let mut last = 0u64;
+            let installer = drivers::download_installer(|done, total| {
+                let pct = (done * 100).checked_div(total).unwrap_or(0);
+                if pct != last {
+                    last = pct;
+                    out.send(Msg::JobStatus(format!(
+                        "Downloading the iTunes installer ... {pct}% ({})",
+                        HumanBytes(done)
+                    )));
+                }
+            })
+            .map_err(fail)?;
+            out.send(Msg::Log(format!(
+                "Installer verified: {}",
+                installer.display()
+            )));
+            out.send(Msg::JobStatus("Unpacking the driver package ...".into()));
+            let msi = drivers::extract_driver(&installer).map_err(fail)?;
+            out.send(Msg::Log(format!("Driver package: {}", msi.display())));
+            out.send(Msg::JobStatus(
+                "Installing drivers - confirm the Windows prompt ...".into(),
+            ));
+            drivers::install_msi(&msi).map_err(fail)?;
+            out.send(Msg::DriverStatus(drivers::status()));
+            Ok(
+                "Apple drivers installed. Unplug the device and connect it again before flashing."
+                    .into(),
+            )
+        });
+    }
+
+    fn drivers_window(&mut self, ctx: &egui::Context) {
+        let Some(panel) = &mut self.drivers else {
+            return;
+        };
+        let mut open = true;
+        let mut install = None;
+        let busy = self.job.is_some();
+        egui::Window::new("Apple Drivers")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(500.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.label(
+                    "Newer devices, iPhone 14 and later in particular, often stop accepting firmware \
+                     uploads in recovery mode with the drivers of the Microsoft Store apps. iTunes from \
+                     apple.com ships a different driver package that handles these transfers reliably.",
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Obsidia downloads the official installer from apple.com, checks Apple's signature \
+                         and installs only Apple Mobile Device Support - not iTunes itself.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.add_space(10.0);
+
+                ui.label(RichText::new("Installed").strong());
+                match &panel.status {
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Checking ...");
+                        });
+                    }
+                    Some(status) => {
+                        egui::Grid::new("driver-status").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                            ui.label(RichText::new("Classic drivers").weak());
+                            match &status.classic {
+                                Some(v) => ui.label(RichText::new(format!("\u{e182} Version {v}")).color(GREEN)),
+                                None => ui.label(RichText::new("Not installed").color(ORANGE)),
+                            };
+                            ui.end_row();
+                            ui.label(RichText::new("Store app").weak());
+                            if status.store_app {
+                                ui.label(RichText::new("Apple Devices / iTunes (Store) installed").color(ORANGE));
+                            } else {
+                                ui.label("Not installed");
+                            }
+                            ui.end_row();
+                        });
+                        ui.add_space(8.0);
+                        if status.store_app {
+                            ui.checkbox(
+                                &mut panel.remove_store,
+                                "Remove the Store app first (recommended, it brings its own drivers)",
+                            );
+                        }
+                    }
+                }
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "Windows asks for administrator rights. Disconnect all devices before you start.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let label = match panel.status.as_ref().and_then(|s| s.classic.as_ref()) {
+                        Some(_) => "Reinstall drivers",
+                        None => "Install drivers",
+                    };
+                    let enabled = panel.status.is_some() && !busy;
+                    if ui.add_enabled(enabled, theme::accent_button(label, ACCENT, enabled)).clicked() {
+                        let remove = panel.status.as_ref().is_some_and(|s| s.store_app) && panel.remove_store;
+                        install = Some(remove);
+                    }
+                    if busy {
+                        ui.label(RichText::new("Another task is running.").weak().small());
+                    }
+                });
+            });
+        if !open {
+            self.drivers = None;
+        }
+        if let Some(remove_store) = install {
+            self.drivers = None;
+            self.start_driver_install(remove_store);
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         let mut changed = false;
@@ -2857,6 +3028,17 @@ impl App {
                 self.tab = Tab::Flash;
                 self.page = FlashPage::Guide;
             }
+            if drivers::supported()
+                && tool_tile(
+                    ui,
+                    "\u{e956}",
+                    "Apple Drivers",
+                    "Classic iTunes USB drivers",
+                    !busy,
+                )
+            {
+                self.open_drivers();
+            }
             if tool_tile(ui, icons::INFO, "About", "Version, license, MirraNET", true) {
                 self.show_about = true;
             }
@@ -3115,6 +3297,7 @@ impl eframe::App for App {
         self.settings_window(&ctx);
         self.dfu_window(&ctx);
         self.about_window(&ctx);
+        self.drivers_window(&ctx);
         self.flash_dialog(&ctx);
     }
 }

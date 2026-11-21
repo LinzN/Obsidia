@@ -7,6 +7,7 @@
 
 mod cli;
 mod device;
+mod drivers;
 mod firmware;
 mod gui;
 mod guides;

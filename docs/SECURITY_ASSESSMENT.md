@@ -118,12 +118,19 @@ Obsidia does not store passwords, Apple ID credentials or any other secrets.
 | `api.ipsw.me` | Firmware list and signing status | HTTPS | Device model identifier | Obsidia |
 | `updates.cdn-apple.com` and other Apple CDN hosts | Firmware download | HTTPS | None beyond the request | Obsidia |
 | `gs.apple.com` | Restore authorization (Apple signing server) | HTTPS | Device identifiers such as ECID, firmware build | `idevicerestore` |
+| `www.apple.com`, `secure-appldnld.apple.com` | Windows only, on demand: download of the official iTunes installer to install the classic Apple USB drivers (*Toolbox > Apple Drivers*) | HTTPS | None beyond the request | Obsidia |
 | `api.github.com` | Update check (latest release) on start-up and on demand | HTTPS | None beyond the request (IP address, user agent with version) | Obsidia |
 | `github.com`, `objects.githubusercontent.com` / `release-assets.githubusercontent.com` | Download of an update installer and `SHA256SUMS`, only after the user clicks *Install update* | HTTPS | None beyond the request | Obsidia |
 
 - No inbound connections, no listening ports.
 - No telemetry, crash reporting or analytics. The only background request is the update
   check against GitHub (see section 5.1).
+- The Apple driver installer is only used after the user starts *Toolbox > Apple Drivers*.
+  Obsidia checks that the installer and the extracted `AppleMobileDeviceSupport64.msi`
+  carry a valid Authenticode signature issued to Apple Inc. before installing, and the
+  installation runs through Windows Installer with a UAC prompt. Optionally the Microsoft
+  Store packages `AppleInc.AppleDevices` / `AppleInc.iTunes` are removed for the current
+  user. Organisations that distribute Apple drivers centrally can skip this feature.
 - Firmware downloads are verified against the SHA-1 checksum published by ipsw.me.
   Independently of that, the device only accepts firmware that is signed by Apple and
   personalized for that device by Apple's signing server.
@@ -137,7 +144,8 @@ Obsidia does not store passwords, Apple ID credentials or any other secrets.
 - The ipsw.me endpoint can be replaced with an internal, compatible mirror via the
   `OBSIDIA_API` environment variable.
 
-Firewall allow list: `api.ipsw.me`, `*.cdn-apple.com`, `gs.apple.com` (TCP 443), plus
+Firewall allow list: `api.ipsw.me`, `*.cdn-apple.com`, `gs.apple.com` (TCP 443), `www.apple.com` and
+`secure-appldnld.apple.com` for the optional driver installer, plus
 `api.github.com`, `github.com` and `*.githubusercontent.com` if the updater is used.
 
 ### 5.1 Updater
