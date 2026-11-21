@@ -808,7 +808,22 @@ impl App {
                     "Attempt {attempt} failed: {detail}. Waiting for the device to reconnect ..."
                 )));
                 out.send(Msg::JobStatus("Waiting for the device to reconnect ...".into()));
-                match device::wait_for_device(&dev.ecid, Duration::from_secs(180)) {
+                let mut found = device::wait_for_device(&dev.ecid, Duration::from_secs(60));
+                if found.is_none() {
+                    // A device that lost the connection in restore mode keeps
+                    // showing the progress bar and never comes back on its own.
+                    let steps = Family::from_product(&dev.product)
+                        .map(|f| f.recovery_steps().join(" "))
+                        .unwrap_or_else(|| "Force restart the device into recovery mode.".into());
+                    out.send(Msg::Log(format!(
+                        "The device did not come back by itself. Force restart it into recovery mode: {steps}"
+                    )));
+                    out.send(Msg::JobStatus(
+                        "Force restart the device into recovery mode - Obsidia continues automatically".into(),
+                    ));
+                    found = device::wait_for_device(&dev.ecid, Duration::from_secs(600));
+                }
+                match found {
                     Some(found) => {
                         out.send(Msg::Log(format!(
                             "Device is back in {} mode, retrying in a few seconds",
@@ -820,7 +835,7 @@ impl App {
                     }
                     None => {
                         return Err(format!(
-                            "{detail} - the device did not reconnect. Put it into recovery or DFU mode and try again."
+                            "{detail} - the device did not reconnect within 10 minutes. Put it into recovery or DFU mode and try again."
                         ))
                     }
                 }
