@@ -195,13 +195,19 @@ pub fn run_with_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<
     })
 }
 
-/// Serializes access to the device: queries and restores never run at the
-/// same time, otherwise they compete for the USB connection.
-static DEVICE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Keeps queries away from the device while a restore or backup runs,
+/// otherwise they compete for the USB connection. Queries can run in
+/// parallel with each other.
+static DEVICE_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// Exclusive access to the device for a longer operation (e.g. a restore).
-pub fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-    DEVICE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+pub fn exclusive() -> std::sync::RwLockWriteGuard<'static, ()> {
+    DEVICE_LOCK.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Shared access for short queries.
+fn shared() -> std::sync::RwLockReadGuard<'static, ()> {
+    DEVICE_LOCK.read().unwrap_or_else(|e| e.into_inner())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -279,36 +285,153 @@ fn query(udid: &str, domain: Option<&str>, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Details of devices in normal mode. Reading them is slow (and hangs until
+/// the user trusts the computer), so a scan only lists the UDIDs and the
+/// details are fetched in the background.
+struct Cached {
+    device: Device,
+    /// Full details (paired connection) available.
+    complete: bool,
+    fetched: Instant,
+    pending: bool,
+}
+
+static DETAILS: std::sync::Mutex<Option<HashMap<String, Cached>>> = std::sync::Mutex::new(None);
+
+/// Full details are re-read after this time (battery level).
+const DETAILS_TTL: Duration = Duration::from_secs(30);
+/// Retry interval while the device is not trusted yet.
+const UNTRUSTED_RETRY: Duration = Duration::from_secs(3);
+
+fn details() -> std::sync::MutexGuard<'static, Option<HashMap<String, Cached>>> {
+    DETAILS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn device_from_info(udid: &str, info: &HashMap<String, String>) -> Device {
+    Device {
+        mode: Mode::Normal,
+        udid: udid.to_string(),
+        ecid: info.get("UniqueChipID").cloned().unwrap_or_default(),
+        product: info
+            .get("ProductType")
+            .cloned()
+            .unwrap_or_else(|| "?".into()),
+        name: info
+            .get("DeviceName")
+            .cloned()
+            .unwrap_or_else(|| "?".into()),
+        version: info.get("ProductVersion").cloned(),
+        build: info.get("BuildVersion").cloned(),
+        serial: info.get("SerialNumber").cloned(),
+        battery: None,
+        capacity: None,
+    }
+}
+
+/// Basic information over an unpaired connection: fast and works before
+/// the user confirmed "Trust this computer".
+fn basic_info(udid: &str) -> Option<Device> {
+    let out = run_with_timeout("ideviceinfo", &["-u", udid, "-s"], Duration::from_secs(5))
+        .ok()
+        .flatten()?;
+    let info = parse_kv(&out);
+    info.contains_key("ProductType")
+        .then(|| device_from_info(udid, &info))
+}
+
+fn full_info(udid: &str) -> Option<Device> {
+    let out = run("ideviceinfo", &["-u", udid]).ok().flatten()?;
+    let info = parse_kv(&out);
+    if !info.contains_key("ProductType") {
+        return None;
+    }
+    let mut dev = device_from_info(udid, &info);
+    dev.battery = query(
+        udid,
+        Some("com.apple.mobile.battery"),
+        "BatteryCurrentCapacity",
+    )
+    .and_then(|s| s.parse().ok());
+    dev.capacity =
+        query(udid, Some("com.apple.disk_usage"), "TotalDiskCapacity").and_then(|s| s.parse().ok());
+    Some(dev)
+}
+
+/// Reads the full details of `udid` on a background thread.
+fn refresh_details(udid: String) {
+    std::thread::spawn(move || {
+        let full = {
+            let _lock = shared();
+            full_info(&udid)
+        };
+        let mut map = details();
+        let Some(entry) = map.as_mut().and_then(|m| m.get_mut(&udid)) else {
+            return; // unplugged in the meantime
+        };
+        entry.pending = false;
+        entry.fetched = Instant::now();
+        if let Some(mut dev) = full {
+            // keep what the basic query found if the full one lacks it
+            if dev.ecid.is_empty() {
+                dev.ecid = entry.device.ecid.clone();
+            }
+            entry.device = dev;
+            entry.complete = true;
+        }
+    });
+}
+
 /// Devices booted into iOS/iPadOS (visible via usbmuxd / Apple Mobile Device Service).
 pub fn normal_devices() -> Result<Vec<Device>> {
     let list = run("idevice_id", &["-l"])?.unwrap_or_default();
+    let udids: Vec<String> = list
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+
+    // forget unplugged devices, so details are read again on reconnect
+    details()
+        .get_or_insert_with(HashMap::new)
+        .retain(|udid, _| udids.contains(udid));
+
     let mut devs = Vec::new();
-    for udid in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let info = parse_kv(&run("ideviceinfo", &["-u", udid])?.unwrap_or_default());
-        devs.push(Device {
-            mode: Mode::Normal,
-            udid: udid.to_string(),
-            ecid: info.get("UniqueChipID").cloned().unwrap_or_default(),
-            product: info
-                .get("ProductType")
-                .cloned()
-                .unwrap_or_else(|| "?".into()),
-            name: info
-                .get("DeviceName")
-                .cloned()
-                .unwrap_or_else(|| "?".into()),
-            version: info.get("ProductVersion").cloned(),
-            build: info.get("BuildVersion").cloned(),
-            serial: info.get("SerialNumber").cloned(),
-            battery: query(
-                udid,
-                Some("com.apple.mobile.battery"),
-                "BatteryCurrentCapacity",
-            )
-            .and_then(|s| s.parse().ok()),
-            capacity: query(udid, Some("com.apple.disk_usage"), "TotalDiskCapacity")
-                .and_then(|s| s.parse().ok()),
+    for udid in udids {
+        let known = details().as_ref().and_then(|m| m.get(&udid)).map(|c| {
+            let age = c.fetched.elapsed();
+            let stale = if c.complete {
+                age > DETAILS_TTL
+            } else {
+                age > UNTRUSTED_RETRY
+            };
+            (c.device.clone(), stale && !c.pending)
         });
+        let (dev, refresh) = match known {
+            Some(known) => known,
+            None => {
+                // new device: show it right away with the basic information
+                let dev =
+                    basic_info(&udid).unwrap_or_else(|| device_from_info(&udid, &HashMap::new()));
+                details().get_or_insert_with(HashMap::new).insert(
+                    udid.clone(),
+                    Cached {
+                        device: dev.clone(),
+                        complete: false,
+                        fetched: Instant::now(),
+                        pending: false,
+                    },
+                );
+                (dev, true)
+            }
+        };
+        if refresh {
+            if let Some(entry) = details().as_mut().and_then(|m| m.get_mut(&udid)) {
+                entry.pending = true;
+            }
+            refresh_details(udid.clone());
+        }
+        devs.push(dev);
     }
     Ok(devs)
 }
@@ -342,9 +465,13 @@ pub fn recovery_device() -> Result<Option<Device>> {
 }
 
 pub fn all_devices() -> Result<Vec<Device>> {
-    let _lock = exclusive();
+    let _lock = shared();
+    // both probes can take a moment, run them side by side
+    let recovery = std::thread::spawn(recovery_device);
     let mut devs = normal_devices()?;
-    devs.extend(recovery_device()?);
+    if let Ok(found) = recovery.join() {
+        devs.extend(found?);
+    }
     Ok(devs)
 }
 

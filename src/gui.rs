@@ -18,7 +18,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const SCAN_INTERVAL: Duration = Duration::from_secs(3);
+const SCAN_INTERVAL: Duration = Duration::from_millis(1500);
 const LOG_LIMIT: usize = 5000;
 const MIRRANET_URL: &str = "https://mirranet.de";
 const GITHUB_URL: &str = "https://github.com/LinzN/obsidia";
