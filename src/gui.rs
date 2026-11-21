@@ -755,12 +755,28 @@ impl App {
                     Some(line) => format!("{line} ({e:#})"),
                     None => format!("{e:#}"),
                 };
+                let upload_failed = lines.iter().any(|l| l.contains("Unable to upload data"));
                 if attempt >= attempts || !retryable(&lines) || dev.ecid.is_empty() {
-                    return Err(if attempt > 1 {
+                    let mut msg = if attempt > 1 {
                         format!("{detail} - failed after {attempt} attempts")
                     } else {
                         detail
-                    });
+                    };
+                    if upload_failed {
+                        msg.push_str(
+                            ". The device does not accept data over USB. Close the Apple Devices app / iTunes, \
+                             force restart the device into recovery or DFU mode, use a USB port directly on \
+                             the computer and try again.",
+                        );
+                    }
+                    return Err(msg);
+                }
+                if upload_failed {
+                    // A USB reset often clears a stuck recovery-mode connection.
+                    out.send(Msg::Log("Upload failed - resetting the USB connection".into()));
+                    let _lock = device::exclusive();
+                    device::reset_recovery_usb();
+                    std::thread::sleep(Duration::from_secs(3));
                 }
 
                 // Typical failure: the connection to the device is lost when it
@@ -1915,7 +1931,7 @@ impl App {
                             );
                             link(ui, "ipsw.me firmware data", "https://ipsw.me");
                             link(ui, "Phosphor Icons (MIT)", "https://phosphoricons.com");
-                        link(ui, "Inter font (OFL)", "https://rsms.me/inter/");
+                            link(ui, "Inter font (OFL)", "https://rsms.me/inter/");
                         });
                         ui.end_row();
                     });
@@ -3502,6 +3518,14 @@ fn retryable(lines: &[String]) -> bool {
 
 /// Checks before a restore so it doesn't fail halfway through.
 fn preflight(ipsw: &Path) -> anyhow::Result<()> {
+    let blocking = device::blocking_apple_apps();
+    if !blocking.is_empty() {
+        anyhow::bail!(
+            "Please close {} first. It takes over devices in recovery mode, so the firmware can't be \
+             uploaded.",
+            blocking.join(" and ")
+        );
+    }
     if device::apple_service_running() == Some(false) {
         anyhow::bail!(
             "The Apple Mobile Device Service is not running. Install or repair the Apple Devices app \

@@ -565,3 +565,40 @@ mod tests {
         assert_eq!(parse_ecid(""), None);
     }
 }
+
+/// Apple apps that grab a device in recovery mode for their own restore
+/// dialog (Windows), which blocks uploads from idevicerestore.
+pub fn blocking_apple_apps() -> Vec<&'static str> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("tasklist");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let Ok(out) = cmd
+        .args(["/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    let list = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    let mut apps = Vec::new();
+    if list.contains("\"appledevices.exe\"") {
+        apps.push("the Apple Devices app");
+    }
+    if list.contains("\"itunes.exe\"") {
+        apps.push("iTunes");
+    }
+    apps
+}
+
+/// USB reset of a device in recovery / DFU mode.
+pub fn reset_recovery_usb() {
+    let _ = run_with_timeout("irecovery", &["-r"], Duration::from_secs(10));
+}
