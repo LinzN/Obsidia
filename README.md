@@ -61,9 +61,10 @@ up in the start menu and can be removed via *Apps & features*.
 
 ### Microsoft Store
 
-The build also produces an MSIX package (`msix-store` artifact of the *Build* workflow) for
-the Microsoft Store, which signs it. The Store version is updated through the Store, the
-built-in update check is turned off there.
+Obsidia is available in the [Microsoft Store](https://apps.microsoft.com/detail/9nsg9p945vbz).
+The Store version is signed by Microsoft, so Smart App Control and SmartScreen don't block it,
+and it is updated through the Store (the built-in update check is turned off there). The
+MSIX package is built by the *Build* workflow (`msix-store` artifact).
 
 ### Linux (Debian / Ubuntu)
 
