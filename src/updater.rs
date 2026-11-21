@@ -58,7 +58,31 @@ fn latest_release_url() -> String {
 /// False if updates are turned off by the administrator: environment variable
 /// `OBSIDIA_NO_UPDATE_CHECK=1` or, on Windows, the policy value
 /// `HKLM\Software\Policies\MirraNET\Obsidia\DisableUpdates = 1`.
+/// True when Obsidia runs as the Microsoft Store (MSIX) package. The Store
+/// installs updates itself, so the built-in updater stays off.
+pub fn store_managed() -> bool {
+    #[cfg(windows)]
+    {
+        static PACKAGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *PACKAGED.get_or_init(|| {
+            use windows_sys::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+            const APPMODEL_ERROR_NO_PACKAGE: u32 = 15700;
+            let mut len = 0u32;
+            // SAFETY: a zero length with a null buffer only queries the size.
+            let rc = unsafe { GetCurrentPackageFullName(&mut len, std::ptr::null_mut()) };
+            rc != APPMODEL_ERROR_NO_PACKAGE
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 pub fn auto_check_enabled() -> bool {
+    if store_managed() {
+        return false;
+    }
     let env_off = matches!(
         std::env::var("OBSIDIA_NO_UPDATE_CHECK").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
@@ -94,7 +118,7 @@ fn disabled_by_policy() -> bool {
 pub fn can_install() -> bool {
     #[cfg(windows)]
     {
-        windows_can_elevate()
+        !store_managed() && windows_can_elevate()
     }
     #[cfg(target_os = "linux")]
     {

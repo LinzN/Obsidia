@@ -21,9 +21,6 @@ jobs:
   windows:
     name: Windows MSI
     runs-on: windows-latest
-    env:
-      # Releases are signed through SignPath once the token is configured.
-      SIGN: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SIGNPATH_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -94,32 +91,6 @@ jobs:
           cp /ucrt64/etc/ssl/certs/ca-bundle.crt dist/etc/ssl/certs/ca-bundle.crt
           cp /tmp/limd/versions.txt dist/tools/VERSIONS.txt
 
-      - name: Upload unsigned binaries
-        id: unsigned-binaries
-        if: env.SIGN == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: unsigned-binaries
-          path: |
-            dist/obsidia.exe
-            dist/tools/*.exe
-            dist/tools/*.dll
-          if-no-files-found: error
-
-      - name: Sign binaries
-        if: env.SIGN == 'true'
-        uses: signpath/github-action-submit-signing-request@v3
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'obsidia' }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
-          artifact-configuration-slug: binaries
-          github-artifact-id: ${{ steps.unsigned-binaries.outputs.artifact-id }}
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: 3600
-          output-artifact-directory: dist
-
       - name: Build MSI
         shell: pwsh
         run: |
@@ -130,33 +101,44 @@ jobs:
           wix build packaging\windows\obsidia.wxs -arch x64 -ext WixToolset.UI.wixext `
             -d "Version=$version" -d "Root=$PWD" -o "out\obsidia-$version-x64.msi"
 
-      - name: Upload unsigned installer
-        id: unsigned-msi
-        if: env.SIGN == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: unsigned-msi
-          path: out/*.msi
-          if-no-files-found: error
-
-      - name: Sign installer
-        if: env.SIGN == 'true'
-        uses: signpath/github-action-submit-signing-request@v3
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'obsidia' }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
-          artifact-configuration-slug: msi
-          github-artifact-id: ${{ steps.unsigned-msi.outputs.artifact-id }}
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: 3600
-          output-artifact-directory: out
-
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: out/*.msi
+          if-no-files-found: error
+
+      # Microsoft Store package. It is uploaded unsigned to Partner Center,
+      # the Store signs it after certification. Not part of the GitHub release.
+      - name: Build MSIX
+        shell: pwsh
+        env:
+          IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME || 'MirraNET.Obsidia' }}
+          PUBLISHER: ${{ vars.MSIX_PUBLISHER || 'CN=MirraNET' }}
+          PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME || 'MirraNET' }}
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $layout = "msix-layout"
+          New-Item -ItemType Directory -Force $layout | Out-Null
+          Copy-Item -Recurse dist\* $layout
+          Copy-Item -Recurse packaging\windows\msix\Assets "$layout\Assets"
+          Copy-Item LICENSE "$layout\LICENSE.txt"
+          (Get-Content packaging\windows\msix\AppxManifest.xml -Raw) `
+            -replace '\{IDENTITY_NAME\}', $env:IDENTITY_NAME `
+            -replace '\{PUBLISHER\}', $env:PUBLISHER `
+            -replace '\{PUBLISHER_DISPLAY_NAME\}', $env:PUBLISHER_DISPLAY_NAME `
+            -replace '\{VERSION\}', $version |
+            Set-Content -Encoding utf8 "$layout\AppxManifest.xml"
+          $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $makeappx) { throw "makeappx.exe not found" }
+          New-Item -ItemType Directory -Force msix | Out-Null
+          & $makeappx.FullName pack /d $layout /p "msix\obsidia-$version-x64.msix" /o
+          if ($LASTEXITCODE -ne 0) { throw "makeappx failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msix-store
+          path: msix/*.msix
           if-no-files-found: error
 
   linux:
@@ -216,8 +198,10 @@ jobs:
     needs: [windows, linux, macos]
     runs-on: ubuntu-latest
     steps:
+      # only the installers, not the Store package
       - uses: actions/download-artifact@v4
         with:
+          pattern: "{windows,linux,macos}"
           path: dist
           merge-multiple: true
 

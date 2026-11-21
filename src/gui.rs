@@ -857,6 +857,9 @@ impl App {
     }
 
     fn check_for_updates(&mut self, manual: bool) {
+        if updater::store_managed() {
+            return;
+        }
         if matches!(
             self.update,
             Some(UpdateState::Checking | UpdateState::Downloading { .. })
@@ -1262,6 +1265,10 @@ impl App {
             ui.add_space(4.0);
             ui.label(RichText::new(format!("Version {}", updater::CURRENT_VERSION)).small());
             ui.label(RichText::new("·").small().weak());
+            if updater::store_managed() {
+                ui.label(RichText::new("Updates via Microsoft Store").small().weak());
+                return;
+            }
             match &self.update {
                 Some(UpdateState::Checking) => {
                     ui.label(RichText::new("Checking for updates ...").small().weak());
@@ -2217,6 +2224,13 @@ impl App {
                 ui.add_space(10.0);
 
                 ui.label(RichText::new("Updates").strong());
+                if updater::store_managed() {
+                    ui.label(
+                        RichText::new("Obsidia is installed from the Microsoft Store, which keeps it up to date.")
+                            .weak()
+                            .small(),
+                    );
+                } else {
                 changed |= ui
                     .checkbox(&mut self.settings.check_updates, "Check for updates on start-up")
                     .changed();
@@ -2239,6 +2253,7 @@ impl App {
                 if ui.button("Check now").clicked() {
                     self.update_dismissed = false;
                     self.check_for_updates(true);
+                }
                 }
                 ui.add_space(10.0);
 
@@ -3026,13 +3041,15 @@ impl App {
                 self.show_log = true;
             }
             let checking = matches!(self.update, Some(UpdateState::Checking));
-            if tool_tile(
-                ui,
-                "\u{e036}",
-                "Updates",
-                "Check for a new version",
-                !checking,
-            ) {
+            if !updater::store_managed()
+                && tool_tile(
+                    ui,
+                    "\u{e036}",
+                    "Updates",
+                    "Check for a new version",
+                    !checking,
+                )
+            {
                 self.update_dismissed = false;
                 self.check_for_updates(true);
             }

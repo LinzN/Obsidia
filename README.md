@@ -55,9 +55,15 @@ Installers for every platform are attached to each
 The installer ships the libimobiledevice tools, so nothing else is needed. Obsidia shows
 up in the start menu and can be removed via *Apps & features*.
 
-> **Smart App Control:** the MSI and the bundled tools are not code-signed yet.
+> **Smart App Control:** the MSI and the bundled tools are not code-signed.
 > If Windows' Smart App Control is turned on, it blocks them
 > (`os error 4551`). Turn it off under *Windows Security > App & browser control*.
+
+### Microsoft Store
+
+The build also produces an MSIX package (`msix-store` artifact of the *Build* workflow) for
+the Microsoft Store, which signs it. The Store version is updated through the Store, the
+built-in update check is turned off there.
 
 ### Linux (Debian / Ubuntu)
 
@@ -162,16 +168,14 @@ Locally the same works with `scripts/release.sh 0.5.0` and `git push origin main
 - **Restore fails:** put the device into **DFU mode** and try again.
 - **Activation Lock** still applies after a restore - you need the Apple ID password.
 
+## Privacy
+
+See [docs/PRIVACY.md](docs/PRIVACY.md).
+
 ## Security
 
 A security assessment for companies evaluating Obsidia is available in
 [docs/SECURITY_ASSESSMENT.md](docs/SECURITY_ASSESSMENT.md).
-
-## Code signing
-
-Windows releases are signed through SignPath: free code signing provided by
-[SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-See [CODE_SIGNING.md](CODE_SIGNING.md) for the signing and privacy policy.
 
 ## About
 

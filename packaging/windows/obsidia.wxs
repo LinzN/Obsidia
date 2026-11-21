@@ -35,11 +35,12 @@
     </StandardDirectory>
 
     <!-- Firmware shared by all users of the computer: C:\Obsidia\Firmware -->
-    <StandardDirectory Id="WindowsVolume">
+    <StandardDirectory Id="TARGETDIR">
       <Directory Id="DATAFOLDER" Name="Obsidia">
         <Directory Id="FIRMWAREFOLDER" Name="Firmware" />
       </Directory>
     </StandardDirectory>
+    <SetDirectory Id="DATAFOLDER" Value="[WindowsVolume]Obsidia" />
 
     <Feature Id="Main" Title="Obsidia" Level="1">
       <Component Directory="INSTALLFOLDER">
