@@ -1266,7 +1266,8 @@ impl App {
             ui.label(RichText::new(format!("Version {}", updater::CURRENT_VERSION)).small());
             ui.label(RichText::new("·").small().weak());
             if updater::store_managed() {
-                ui.label(RichText::new("Updates via Microsoft Store").small().weak());
+                ui.label(RichText::new("Microsoft Store").small().weak())
+                    .on_hover_text("Updates are installed by the Microsoft Store");
                 return;
             }
             match &self.update {
