@@ -178,7 +178,7 @@ Firewall allow list: `api.ipsw.me`, `*.cdn-apple.com`, `gs.apple.com` (TCP 443),
 | Linux | `.deb`, requires root | Standard user with USB access via `usbmuxd` | Binary in `/usr/bin`, desktop entry, icons; depends on `libimobiledevice-utils`, `irecovery`, `idevicerestore`, `usbmuxd` |
 | macOS | Drag & drop `.app` | Standard user | App in `/Applications`; tools installed via Homebrew |
 
-Obsidia does not install services, drivers, scheduled tasks or autostart entries. Updates run only when a user starts them (section 5.1). On
+Obsidia does not install services, scheduled tasks or autostart entries, and installs drivers only when a user starts *Toolbox > Apple Drivers* (section 5). Updates run only when a user starts them (section 5.1). On
 Windows the Apple USB drivers come from Apple (Apple Devices app or iTunes) and must be
 approved separately.
 

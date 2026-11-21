@@ -21,6 +21,9 @@ jobs:
   windows:
     name: Windows MSI
     runs-on: windows-latest
+    env:
+      # Releases are signed through SignPath once the token is configured.
+      SIGN: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SIGNPATH_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -91,6 +94,32 @@ jobs:
           cp /ucrt64/etc/ssl/certs/ca-bundle.crt dist/etc/ssl/certs/ca-bundle.crt
           cp /tmp/limd/versions.txt dist/tools/VERSIONS.txt
 
+      - name: Upload unsigned binaries
+        id: unsigned-binaries
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-binaries
+          path: |
+            dist/obsidia.exe
+            dist/tools/*.exe
+            dist/tools/*.dll
+          if-no-files-found: error
+
+      - name: Sign binaries
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'obsidia' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: binaries
+          github-artifact-id: ${{ steps.unsigned-binaries.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: dist
+
       - name: Build MSI
         shell: pwsh
         run: |
@@ -100,6 +129,29 @@ jobs:
           New-Item -ItemType Directory -Force out | Out-Null
           wix build packaging\windows\obsidia.wxs -arch x64 -ext WixToolset.UI.wixext `
             -d "Version=$version" -d "Root=$PWD" -o "out\obsidia-$version-x64.msi"
+
+      - name: Upload unsigned installer
+        id: unsigned-msi
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-msi
+          path: out/*.msi
+          if-no-files-found: error
+
+      - name: Sign installer
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'obsidia' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: msi
+          github-artifact-id: ${{ steps.unsigned-msi.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: out
 
       - uses: actions/upload-artifact@v4
         with:

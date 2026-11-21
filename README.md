@@ -164,6 +164,12 @@ Locally the same works with `scripts/release.sh 0.5.0` and `git push origin main
 A security assessment for companies evaluating Obsidia is available in
 [docs/SECURITY_ASSESSMENT.md](docs/SECURITY_ASSESSMENT.md).
 
+## Code signing
+
+Windows releases are signed through SignPath: free code signing provided by
+[SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+See [CODE_SIGNING.md](CODE_SIGNING.md) for the signing and privacy policy.
+
 ## About
 
 Obsidia is developed by [MirraNET](https://mirranet.de). Source code, issues and releases:
