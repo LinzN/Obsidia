@@ -11,9 +11,15 @@ exceptions:
   [ipsw.me](https://ipsw.me) to list the available firmware.
 - **Restore:** during a restore, device identifiers are sent to Apple's signing server.
   This is required by Apple to install firmware.
+- **Apple drivers (Windows):** only when you ask for it, Apple's official installer is
+  downloaded from apple.com. No data is sent beyond the request.
 
-Obsidia has no telemetry, analytics or crash reporting and no user accounts. Firmware, backups
-and logs as well as photos, app lists, device reports and system logs read from a device stay on the computer.
+Device information that Obsidia reads over USB – battery and hardware details, the list of
+installed apps, the "Find My" state, photos, crash reports and the system log – is only
+shown in the program or saved to folders on your computer when you ask for it. It is never
+sent anywhere. Backup passwords are only passed to the backup tool and are not stored.
+
+Obsidia has no telemetry, analytics or crash reporting and no user accounts.
 
 Contact: niklas.linz@mirranet.de ([MirraNET](https://mirranet.de))
 

@@ -32,7 +32,7 @@ from [ipsw.me](https://ipsw.me).
 - Drag & drop a local `.ipsw` onto the window to flash it
 - Downloaded firmware is reused while Apple signs it; optional auto-clean removes expired files
 - Step-by-step guides for recovery and DFU mode for every iPhone and iPad generation
-- Apple drivers (Windows): installs the classic USB drivers from Apple's iTunes installer
+- Apple drivers (Windows): notices a missing Apple Mobile Device Service and installs the classic USB drivers from Apple's iTunes installer
   (signature checked, without iTunes itself). They fix aborted uploads in recovery mode that
   are common with the Microsoft Store drivers on iPhone 14 and newer
 - Battery & diagnostics: battery health (maximum capacity, charge cycles, temperature),
@@ -61,6 +61,7 @@ Installers for every platform are attached to each
 ### Windows
 
 1. Install Apple's USB drivers: the **Apple Devices** app (Microsoft Store) or iTunes.
+   Obsidia notices when they are missing and can install them (*Toolbox > Apple Drivers*).
 2. Run `obsidia-<version>-x64.msi`.
 
 The installer ships the libimobiledevice tools, so nothing else is needed. Obsidia shows
@@ -74,8 +75,10 @@ up in the start menu and can be removed via *Apps & features*.
 
 Obsidia is available in the [Microsoft Store](https://apps.microsoft.com/detail/9nsg9p945vbz).
 The Store version is signed by Microsoft, so Smart App Control and SmartScreen don't block it,
-and it is updated through the Store (the built-in update check is turned off there). The
-MSIX package is built by the *Build* workflow (`msix-store` artifact).
+and it is updated through the Store (the built-in update check is turned off there).
+It cannot install Apple's drivers itself: if they are missing, Obsidia downloads Apple's
+driver package and opens the folder so you can run it. The MSIX package is attached to every
+release (`obsidia-<version>-x64-store.msix`) for upload to Partner Center.
 
 ### Linux (Debian / Ubuntu)
 
@@ -83,7 +86,7 @@ MSIX package is built by the *Build* workflow (`msix-store` artifact).
 sudo apt install ./obsidia_<version>-1_amd64.deb
 ```
 
-This pulls in `libimobiledevice-utils`, `irecovery`, `idevicerestore` and `usbmuxd`.
+This pulls in `libimobiledevice-utils`, `irecovery`, `idevicerestore`, `ideviceinstaller` and `usbmuxd`.
 Obsidia appears in the application menu.
 
 ### macOS
@@ -177,8 +180,12 @@ Locally the same works with `scripts/release.sh 0.5.0` and `git push origin main
 
 ## Troubleshooting
 
-- **Device not found (Windows):** make sure the Apple Devices app / iTunes is installed and
-  the device shows up there.
+- **Device not found (Windows):** Obsidia shows a notice when the Apple Mobile Device
+  Service is missing or stopped. Install the Apple drivers from there, or the Apple Devices
+  app / iTunes, and make sure the device shows up there.
+- **Uploads abort in recovery mode (iPhone 14 and newer):** install the classic Apple
+  drivers (*Toolbox > Apple Drivers*) instead of the Store app's drivers.
+- **Backup restore fails:** turn off "Find My" on the device first.
 - **Restore fails:** put the device into **DFU mode** and try again.
 - **Activation Lock** still applies after a restore - you need the Apple ID password.
 

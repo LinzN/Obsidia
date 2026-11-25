@@ -6,8 +6,8 @@
 | **Product** | Obsidia – iPhone / iPad firmware tool |
 | **Vendor** | MirraNET ([mirranet.de](https://mirranet.de)) |
 | **Version covered** | 0.4.x |
-| **Platforms** | Windows 10/11 (x64), Debian/Ubuntu (amd64), macOS 11+ (Apple Silicon) |
-| **Date** | 2026-11-20 |
+| **Platforms** | Windows 10/11 (x64, MSI or Microsoft Store), Debian/Ubuntu (amd64), macOS 11+ (Apple Silicon) |
+| **Date** | 2026-11-25 |
 | **Status** | Self-assessment, not independently audited |
 
 This document gives security, IT and compliance teams the information they need to
@@ -22,17 +22,19 @@ can be used directly in an approval process.
 
 Obsidia is a desktop application (with an additional command line interface) that
 installs, updates and restores the firmware of iPhones and iPads connected via USB. It
-also creates local backups and switches devices into and out of recovery mode.
+also manages device backups (create, restore, delete, encryption), lists, installs and
+removes apps, copies photos and crash reports to the computer, shows the live system log
+and battery / hardware diagnostics, and switches devices into and out of recovery mode.
 
 | Area | Assessment |
 |---|---|
-| Data processed | Device identifiers, firmware files, optional device backups (may contain personal data) |
+| Data processed | Device identifiers, firmware files, battery and hardware details; on user request device backups, photos, app lists, system logs and crash reports (may contain personal data) |
 | Data sent to third parties | Device model to ipsw.me; device identifiers to Apple during a restore (required by Apple); update check to GitHub (no device data) |
 | Telemetry / analytics | None (update check only, can be disabled) |
 | User accounts / credentials | None |
 | Network listeners | None |
 | Required privileges | Administrator for installation; standard user for operation (see section 6) |
-| Code signing | **Not signed yet** (see risk R1) |
+| Code signing | Microsoft Store version: signed by Microsoft. MSI, `.deb` and `.dmg`: **not signed** (see risk R1) |
 | Overall risk rating | **Medium** – mainly driven by the destructive nature of firmware restores and unsigned binaries |
 
 ---
@@ -60,7 +62,10 @@ firmware that Apple currently authorizes; the device itself verifies Apple's sig
 |    +-- starts helper tools (child processes)        |
 |          idevice_id, ideviceinfo, irecovery,        |
 |          idevicerestore, idevicebackup2,            |
-|          ideviceenterrecovery                       |
+|          ideviceenterrecovery, idevicediagnostics,  |
+|          ideviceinstaller, idevicesyslog,           |
+|          idevicecrashreport, idevicescreenshot,     |
+|          afcclient                                  |
 |            |   restore authorization (HTTPS) -------+----> Apple signing server
 |            |                                        |
 |            +-- USB via usbmuxd / Apple Mobile Device Service
@@ -75,10 +80,11 @@ firmware that Apple currently authorizes; the device itself verifies Apple's sig
 | `obsidia` | Main program (GUI and CLI) | This project, Rust |
 | libimobiledevice tools | Talk to the device over USB | libimobiledevice project (LGPL) |
 | `idevicerestore` | Performs the firmware restore / update | libimobiledevice project (LGPL) |
+| `ideviceinstaller`, `afcclient`, `idevicesyslog`, `idevicecrashreport`, `idevicediagnostics` | App management, photo export, system log, crash reports, battery data | libimobiledevice project (LGPL) |
 | Apple Mobile Device Service (Windows) / `usbmuxd` (Linux) | USB multiplexing to the device | Apple / libimobiledevice |
 
-On Windows the helper tools are shipped inside the MSI (`<install dir>\tools`). On Linux
-and macOS they come from the system package manager.
+On Windows the helper tools are shipped inside the MSI / MSIX package (`<install dir>\tools`).
+On Linux and macOS they come from the system package manager.
 
 ---
 
@@ -87,15 +93,17 @@ and macOS they come from the system package manager.
 | Data | Where it is stored | Leaves the workstation? | Classification |
 |---|---|---|---|
 | Device model (product type, e.g. `iPhone14,5`) | Memory only | Yes – to ipsw.me to list firmware | Public |
-| UDID, ECID, serial number, device name, OS version, battery level, capacity | Memory, shown in the UI and log window | ECID and related identifiers are sent to Apple during a restore (required by Apple's restore process) | Internal / personal data if the device is assigned to a person |
+| UDID, ECID, serial number, IMEI, device name, OS version, battery health, capacity, "Find My" state | Memory, shown in the UI and log window | ECID and related identifiers are sent to Apple during a restore (required by Apple's restore process) | Internal / personal data if the device is assigned to a person |
 | Firmware files (`.ipsw`) and their metadata (`.ipsw.json`) | `C:\Obsidia\Firmware` on Windows (shared by all users), `Documents/Obsidia/Firmware` on Linux and macOS | No | Public (Apple software) |
 | Device backups | `Documents/Obsidia/Backups` | No | **Confidential** – may contain personal and business data |
 | Restore logs | `Documents/Obsidia/Logs` | No | Internal – contain device identifiers (ECID, serial number) |
 | Saved device logs (console) | `Documents/Obsidia/Logs` | No | **Confidential** – may contain app and user activity |
 | Device reports (battery, IMEI, serial number) | `Documents/Obsidia/Reports` | No | Internal – device identifiers |
 | Exported photos, screenshots, crash reports | `Documents/Obsidia/Photos`, `Screenshots`, `CrashReports` | No | **Confidential** – personal data from the device |
+| List of installed apps | Memory only | No | Internal / personal data if the device is assigned to a person |
+| Apple driver package (Microsoft Store version) | `Documents/Obsidia/Drivers` | No | Public (Apple software) |
 | Activity log | Memory only, can be copied by the user | No | Internal |
-| Settings (auto-clean, update check) | `obsidia/settings.json` in the user config folder | No | Internal |
+| Settings (auto-clean, automatic download, update check, language) | `obsidia/settings.json` in the user config folder | No | Internal |
 
 Storage locations: firmware is kept in `C:\Obsidia\Firmware` on Windows, a folder the installer
 creates with modify rights for the local *Users* group so that all users share the downloads
@@ -108,9 +116,15 @@ user cache folder (`%LOCALAPPDATA%\obsidia\updates`, `~/.cache/obsidia/updates`,
 Downloaded firmware is reused as long as Apple still signs it. With **auto-clean** enabled,
 files that Apple no longer signs are deleted automatically.
 
-**Backups:** Backups are created with `idevicebackup2`. They are only encrypted if backup
-encryption is enabled on the device itself. Without it, backups contain readable personal
-data (messages, photos, contacts, app data) on the workstation's disk.
+**Backups:** Backups are created and restored with `idevicebackup2`. They are only
+encrypted if backup encryption is enabled on the device, which Obsidia can turn on and off
+(*Device > Backups*). Without it, backups contain readable personal data (messages,
+photos, contacts, app data) on the workstation's disk. Backup passwords are entered in a
+dialog, passed to `idevicebackup2` through an environment variable (not on the command
+line) and are never stored.
+
+**Photos, system log, crash reports:** only copied or shown when a user starts it on the
+*Device* tab. They stay on the workstation in the folders listed above.
 
 Obsidia does not store passwords, Apple ID credentials or any other secrets.
 
@@ -123,7 +137,7 @@ Obsidia does not store passwords, Apple ID credentials or any other secrets.
 | `api.ipsw.me` | Firmware list and signing status | HTTPS | Device model identifier | Obsidia |
 | `updates.cdn-apple.com` and other Apple CDN hosts | Firmware download | HTTPS | None beyond the request | Obsidia |
 | `gs.apple.com` | Restore authorization (Apple signing server) | HTTPS | Device identifiers such as ECID, firmware build | `idevicerestore` |
-| `www.apple.com`, `secure-appldnld.apple.com` | Windows only, on demand: download of the official iTunes installer to install the classic Apple USB drivers (*Toolbox > Apple Drivers*) | HTTPS | None beyond the request | Obsidia |
+| `www.apple.com`, `secure-appldnld.apple.com` | Windows only, on demand: download of the official iTunes installer for the classic Apple USB drivers (*Toolbox > Apple Drivers* or the "Get Apple drivers" banner) | HTTPS | None beyond the request | Obsidia |
 | `api.github.com` | Update check (latest release) on start-up and on demand | HTTPS | None beyond the request (IP address, user agent with version) | Obsidia |
 | `github.com`, `objects.githubusercontent.com` / `release-assets.githubusercontent.com` | Download of an update installer and `SHA256SUMS`, only after the user clicks *Install update* | HTTPS | None beyond the request | Obsidia |
 
@@ -135,7 +149,11 @@ Obsidia does not store passwords, Apple ID credentials or any other secrets.
   carry a valid Authenticode signature issued to Apple Inc. before installing, and the
   installation runs through Windows Installer with a UAC prompt. Optionally the Microsoft
   Store packages `AppleInc.AppleDevices` / `AppleInc.iTunes` are removed for the current
-  user. Organisations that distribute Apple drivers centrally can skip this feature.
+  user. The Microsoft Store version installs nothing itself: it only places the verified
+  driver package in `Documents/Obsidia/Drivers` and opens the folder, the user runs it.
+  Organisations that distribute Apple drivers centrally can skip this feature.
+- On Windows Obsidia checks with `sc query` whether the Apple Mobile Device Service is
+  installed and running and shows a notice if it is not. This is a local check.
 - Firmware downloads are verified against the SHA-1 checksum published by ipsw.me.
   Independently of that, the device only accepts firmware that is signed by Apple and
   personalized for that device by Apple's signing server.
@@ -179,8 +197,9 @@ Firewall allow list: `api.ipsw.me`, `*.cdn-apple.com`, `gs.apple.com` (TCP 443),
 
 | Platform | Installation | Operation | System changes |
 |---|---|---|---|
-| Windows | MSI, per-machine, requires administrator | Standard user | Files in `Program Files\Obsidia`, start menu and desktop shortcut, uninstall entry, registry key `HKLM\Software\MirraNET\Obsidia` |
-| Linux | `.deb`, requires root | Standard user with USB access via `usbmuxd` | Binary in `/usr/bin`, desktop entry, icons; depends on `libimobiledevice-utils`, `irecovery`, `idevicerestore`, `usbmuxd` |
+| Windows (MSI) | Per-machine, requires administrator | Standard user | Files in `Program Files\Obsidia`, start menu and desktop shortcut, uninstall entry, registry key `HKLM\Software\MirraNET\Obsidia`, folder `C:\Obsidia\Firmware` with modify rights for *Users* (kept on uninstall) |
+| Windows (Microsoft Store) | MSIX, per user, no administrator needed | Standard user (full trust desktop app) | Package managed by Windows; firmware folder `C:\Obsidia\Firmware` created on first start; no drivers or services installed |
+| Linux | `.deb`, requires root | Standard user with USB access via `usbmuxd` | Binary in `/usr/bin`, desktop entry, icons; depends on `libimobiledevice-utils`, `irecovery`, `idevicerestore`, `ideviceinstaller`, `usbmuxd` |
 | macOS | Drag & drop `.app` | Standard user | App in `/Applications`; tools installed via Homebrew |
 
 Obsidia does not install services, scheduled tasks or autostart entries, and installs drivers only when a user starts *Toolbox > Apple Drivers* (section 5). Updates run only when a user starts them (section 5.1). On
@@ -203,9 +222,9 @@ msiexec /x obsidia-<version>-x64.msi /qn
 | Source code | Public on GitHub (`LinzN/obsidia`), MIT license |
 | Language | Rust (memory-safe); no `unsafe` code in the application except one Windows console API call |
 | Third-party Rust crates | ~450 crates in the dependency tree (GUI, HTTP, TLS); versions pinned via `Cargo.lock` |
-| Bundled native tools (Windows) | libimobiledevice, libirecovery, idevicerestore and their DLLs, taken from MSYS2 packages at build time |
+| Bundled native tools (Windows) | libplist, libimobiledevice-glue, libusbmuxd, libtatsu, libimobiledevice, libirecovery, idevicerestore and ideviceinstaller, built from the current upstream sources on every build (versions in `tools/VERSIONS.txt`); OpenSSL, curl, libzip and other runtime DLLs from MSYS2 packages |
 | Build | GitHub Actions on GitHub-hosted runners; release artifacts are built from the tagged commit |
-| Code signing | **Not yet** – MSI, executables and macOS app are unsigned / not notarized |
+| Code signing | Microsoft Store package signed by Microsoft; MSI, executables and macOS app are unsigned / not notarized |
 | SBOM | Not yet published |
 | Vulnerability scanning | Not yet automated |
 
@@ -218,8 +237,8 @@ Licenses of bundled components: MIT / Apache-2.0 (Rust crates), LGPL-2.1 / LGPL-
 
 | ID | Risk | Likelihood | Impact | Mitigation | Status |
 |---|---|---|---|---|---|
-| R1 | Unsigned binaries cannot be verified for origin and integrity; blocked by Smart App Control / application control | High | Medium | Sign MSI, executables and bundled tools; notarize macOS app. Until then: allow by file hash, download only from the official release page | Open |
-| R2 | Erase restore deletes all data on a device by mistake | Medium | High | Confirmation dialog showing device and firmware; backup function; restrict usage to trained staff | Partially mitigated |
+| R1 | Unsigned binaries (MSI, `.deb`, `.dmg`) cannot be verified for origin and integrity; blocked by Smart App Control / application control | High | Medium | Use the Microsoft Store version (signed by Microsoft) where possible; otherwise allow by file hash and download only from the official release page | Partially mitigated |
+| R2 | Erase restore deletes all data on a device by mistake (also several devices at once) | Medium | High | Confirmation dialog listing every device and the firmware, additional devices must be ticked one by one; warning when "Find My" is on; backup function; restrict usage to trained staff | Partially mitigated |
 | R3 | Unencrypted device backups on workstation disks | Medium | High | Enable backup encryption on devices, store backups on encrypted volumes, delete when no longer needed | Organizational |
 | R4 | Restored device loses MDM supervision / enrollment | Medium | Medium | Use Automated Device Enrollment so devices re-enroll after restore | Organizational |
 | R5 | Activation Lock blocks a restored device | Medium | Medium | Remove Activation Lock via MDM / Apple Business Manager before restoring | Organizational |
@@ -228,7 +247,9 @@ Licenses of bundled components: MIT / Apache-2.0 (Rust crates), LGPL-2.1 / LGPL-
 | R8 | Outdated bundled native tools | Medium | Medium | Tools are refreshed on every release build; document versions in release notes | Partially mitigated |
 | R9 | Availability of ipsw.me (third-party service) | Low | Low | Internal mirror via `OBSIDIA_API`; local IPSW import | Mitigated |
 | R10 | Device identifiers shared with Apple and ipsw.me | High | Low | Required for the restore process; document in the record of processing activities | Accepted |
-| R11 | Malicious update through a compromised GitHub account or release pipeline | Low | High | Update needs user action and admin rights; SHA-256 check; companies disable the updater (`OBSIDIA_NO_UPDATE_CHECK=1`) and distribute reviewed versions. Planned: signed installers | Partially mitigated |
+| R11 | Malicious update through a compromised GitHub account or release pipeline | Low | High | Update needs user action and admin rights; SHA-256 check; companies disable the updater (`OBSIDIA_NO_UPDATE_CHECK=1`) and distribute reviewed versions. The Store version is updated only through Microsoft's certification | Partially mitigated |
+| R12 | Personal data copied to the workstation (photos, system logs, crash reports, backups) | Medium | High | Only on explicit user action; define who may use these functions, store on encrypted volumes, delete when no longer needed | Organizational |
+| R13 | Unwanted apps installed on managed devices via `.ipa` files | Low | Medium | iOS only installs apps with a valid Apple signature/provisioning; manage allowed apps through MDM; restrict usage to trained staff | Organizational |
 
 Rating scale: Low / Medium / High.
 
@@ -264,7 +285,8 @@ Use this checklist in the software approval process.
 - [ ] Installer downloaded from the official GitHub release page only
 - [ ] File hash of the installer recorded and checked before distribution
 - [ ] Application control (AppLocker / WDAC / Smart App Control) rule created for Obsidia and its `tools` folder
-- [ ] Apple USB drivers (Apple Devices app or iTunes) approved
+- [ ] Apple USB drivers (Apple Devices app, iTunes or Apple Mobile Device Support) approved
+- [ ] Decision on MSI or Microsoft Store version (the Store version is signed and updated by Microsoft)
 - [ ] Distribution via software deployment (silent MSI install) to authorized workstations only
 - [ ] Firewall / proxy allows `api.ipsw.me`, `*.cdn-apple.com`, `gs.apple.com`; hosts excluded from TLS inspection
 
@@ -272,6 +294,7 @@ Use this checklist in the software approval process.
 - [ ] Backup storage location defined, on an encrypted volume
 - [ ] Backup encryption enabled on managed devices
 - [ ] Retention and deletion rules for backups, restore logs and firmware defined (auto-clean on or off)
+- [ ] Rules for copying photos, system logs and crash reports from devices (who, why, how long kept)
 
 **Device management**
 - [ ] Devices enrolled via Automated Device Enrollment so they re-enroll after a restore
@@ -287,8 +310,9 @@ Use this checklist in the software approval process.
 
 ## 11. Recommended improvements (vendor roadmap)
 
-1. Authenticode-sign the MSI, `obsidia.exe` and all bundled tools; notarize the macOS app.
-2. Publish an SBOM (CycloneDX) and checksums (`SHA256SUMS`) with every release.
+1. Authenticode-sign the MSI, `obsidia.exe` and all bundled tools; notarize the macOS app
+   (the Microsoft Store package is already signed by Microsoft).
+2. Publish an SBOM (CycloneDX) with every release (`SHA256SUMS` is already published).
 3. Add `cargo audit` and `cargo deny` to CI and fail builds on known vulnerabilities.
 4. Verify firmware with SHA-256 where available.
 5. Optional admin settings (e.g. disable "Erase", fixed backup location) via registry / config file.

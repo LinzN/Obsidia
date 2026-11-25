@@ -610,7 +610,7 @@ impl App {
             .column(Column::remainder().at_least(200.0))
             .column(Column::auto().at_least(80.0))
             .column(Column::auto().at_least(90.0))
-            .column(Column::auto().at_least(110.0))
+            .column(Column::auto().at_least(150.0))
             .header(26.0, |mut h| {
                 for t in [tr("App"), tr("Version"), tr("Size"), ""] {
                     h.col(|ui| {
