@@ -199,6 +199,24 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// For the Microsoft Store version, which does not install other software
+/// itself: copies the driver package to `Documents/Obsidia/Drivers`, where
+/// the user can run it. Returns the copied file.
+pub fn stage_for_manual_install(msi: &Path) -> Result<PathBuf> {
+    let dir = crate::firmware::data_dir().join("Drivers");
+    std::fs::create_dir_all(&dir)?;
+    let target = dir.join(DRIVER_MSI);
+    std::fs::copy(msi, &target)?;
+    Ok(target)
+}
+
+/// Opens Explorer with `file` selected.
+pub fn reveal(file: &Path) {
+    let _ = hidden("explorer")
+        .arg(format!("/select,{}", file.display()))
+        .spawn();
+}
+
 /// Installs the driver package. Windows asks for administrator rights.
 pub fn install_msi(msi: &Path) -> Result<()> {
     let log = crate::firmware::logs_dir()

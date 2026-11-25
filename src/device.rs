@@ -670,6 +670,48 @@ pub fn wait_for_device(ecid: &str, timeout: std::time::Duration) -> Option<Devic
 
 /// Windows only: is the Apple Mobile Device Service running? `None` if
 /// unknown or not applicable.
+/// State of Apple's "Apple Mobile Device Service" on Windows. It comes with
+/// the Apple Devices app, iTunes or the Apple Mobile Device Support package;
+/// without it no device in normal mode can be seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceState {
+    Missing,
+    Stopped,
+    Running,
+}
+
+pub fn apple_service_state() -> Option<ServiceState> {
+    if !cfg!(windows) {
+        return None;
+    }
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("sc");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd
+        .args(["query", "Apple Mobile Device Service"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    // 1060: the service does not exist
+    if out.status.code() == Some(1060) {
+        return Some(ServiceState::Missing);
+    }
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Some(if text.contains("RUNNING") {
+        ServiceState::Running
+    } else {
+        ServiceState::Stopped
+    })
+}
+
 pub fn apple_service_running() -> Option<bool> {
     if !cfg!(windows) {
         return None;

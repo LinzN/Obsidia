@@ -486,6 +486,18 @@ const DE: &[(&str, &str)] = &[
     ("\u{e4e0} \"Find My\" is on ({}). After the restore the device can only be set up with the Apple ID and password of its owner. Turn it off in Settings first if the device is handed over.", "\u{e4e0} „Wo ist?“ ist aktiv ({}). Nach der Wiederherstellung lässt sich das Gerät nur mit Apple-ID und Passwort des Besitzers einrichten. Bei einer Geräteübergabe vorher in den Einstellungen ausschalten."),
     ("\u{e4e0} Battery is at {} %. Charge the device first for a reliable restore.", "\u{e4e0} Akku bei {} %. Für eine zuverlässige Wiederherstellung das Gerät vorher laden."),
     ("{} used of {}", "{} von {} belegt"),
+    ("Download Apple drivers", "Apple-Treiber herunterladen"),
+    ("Downloading the iTunes installer ... {}", "iTunes-Installer wird geladen … {}"),
+    ("Run {} in the folder that just opened, then restart Obsidia.", "{} im gerade geöffneten Ordner ausführen und danach Obsidia neu starten."),
+    ("The Microsoft Store version cannot install drivers itself. Obsidia downloads the official installer from apple.com, checks Apple's signature and opens the folder with the driver package (AppleMobileDeviceSupport64.msi). Run it there - Windows asks for administrator rights - and restart Obsidia.", "Die Microsoft-Store-Version kann Treiber nicht selbst installieren. Obsidia lädt den offiziellen Installer von apple.com, prüft Apples Signatur und öffnet den Ordner mit dem Treiberpaket (AppleMobileDeviceSupport64.msi). Dort ausführen – Windows fragt nach Administratorrechten – und danach Obsidia neu starten."),
+    ("Apple Mobile Device Service", "Apple Mobile Device Service"),
+    ("Running", "Läuft"),
+    ("Not running", "Läuft nicht"),
+    ("Download installer", "Installer herunterladen"),
+    ("Apple Mobile Device Support is not installed - Obsidia cannot see devices without it.", "Apple Mobile Device Support ist nicht installiert – ohne ihn kann Obsidia keine Geräte erkennen."),
+    ("The Apple Mobile Device Service is not running - Obsidia cannot see devices.", "Der Apple Mobile Device Service läuft nicht – Obsidia kann keine Geräte erkennen."),
+    ("Get Apple drivers", "Apple-Treiber holen"),
+    ("Start it in services.msc or restart the computer.", "In services.msc starten oder den Computer neu starten."),
 ];
 
 #[cfg(test)]

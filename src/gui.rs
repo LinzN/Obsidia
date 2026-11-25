@@ -74,6 +74,7 @@ enum Msg {
     UpdateDownloaded(Result<PathBuf, String>),
     DriverStatus(drivers::Status),
     LocalFirmwareChanged,
+    AppleService(Option<device::ServiceState>),
     Diagnostics(String, Result<Report, String>),
     FindMy(String, Option<bool>),
     Backups(Vec<crate::backup::BackupInfo>),
@@ -272,6 +273,8 @@ struct App {
     guide_family: Option<Family>,
     dfu: Option<DfuAssistant>,
     drivers: Option<DriverPanel>,
+    /// Windows: state of the Apple Mobile Device Service.
+    apple_service: Option<device::ServiceState>,
     diag: HashMap<String, DiagState>,
     /// "Find My" state per device key (None while it is being read).
     find_my: HashMap<String, Option<bool>>,
@@ -335,6 +338,7 @@ impl App {
             guide_family: None,
             dfu: None,
             drivers: None,
+            apple_service: None,
             diag: HashMap::new(),
             find_my: HashMap::new(),
             device_page: DevicePage::Overview,
@@ -353,6 +357,7 @@ impl App {
             app.check_for_updates(false);
         }
         app.refresh_local_files();
+        app.check_apple_service();
         app.spawn(|out| {
             let moved = firmware::migrate_user_firmware();
             if moved > 0 {
@@ -583,6 +588,7 @@ impl App {
                     });
                 }
                 Msg::LocalFirmwareChanged => self.refresh_local_files(),
+                Msg::AppleService(state) => self.apple_service = state,
                 Msg::Backups(list) => {
                     self.backups = Some(list);
                     self.backups_loading = false;
@@ -643,6 +649,8 @@ impl App {
                     }
                 }
                 Msg::JobDone(res) => {
+                    // e.g. after installing the Apple drivers
+                    self.check_apple_service();
                     let job = self.job.take();
                     let title = job.as_ref().map(|j| j.title.clone()).unwrap_or_default();
                     match &res {
@@ -930,6 +938,54 @@ impl App {
     }
 
     /// Fluent-style info bar shown below the header when an update is available.
+    /// Windows: shown while Apple's device service is missing or stopped.
+    fn service_bar(&mut self, ui: &mut egui::Ui) {
+        let missing = self.apple_service == Some(device::ServiceState::Missing);
+        let mut open_drivers = false;
+        let mut recheck = false;
+        egui::Frame::new()
+            .fill(ORANGE.gamma_multiply(0.14))
+            .stroke(Stroke::new(1.0, ORANGE.gamma_multiply(0.6)))
+            .corner_radius(4)
+            .inner_margin(egui::Margin::symmetric(14, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("\u{e4e0}").color(ORANGE).size(16.0));
+                    ui.label(
+                        RichText::new(if missing {
+                            tr("Apple Mobile Device Support is not installed - Obsidia cannot see devices without it.")
+                        } else {
+                            tr("The Apple Mobile Device Service is not running - Obsidia cannot see devices.")
+                        })
+                        .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(tr("Check again")).clicked() {
+                            recheck = true;
+                        }
+                        if missing {
+                            if ui
+                                .add(theme::accent_button(tr("Get Apple drivers"), ACCENT, !self.busy()))
+                                .clicked()
+                            {
+                                open_drivers = true;
+                            }
+                        } else {
+                            ui.label(RichText::new(tr("Start it in services.msc or restart the computer.")).weak());
+                        }
+                    });
+                });
+            });
+        if open_drivers {
+            self.open_drivers();
+        }
+        if recheck {
+            self.check_apple_service();
+            self.last_scan = None;
+        }
+    }
+
     fn update_bar(&mut self, ui: &mut egui::Ui) {
         let mut action: Option<&str> = None;
         let busy = self.busy();
@@ -2091,6 +2147,45 @@ impl App {
             remove_store: true,
         });
         self.spawn(|out| out.send(Msg::DriverStatus(drivers::status())));
+        self.check_apple_service();
+    }
+
+    fn check_apple_service(&mut self) {
+        if cfg!(windows) {
+            self.spawn(|out| out.send(Msg::AppleService(device::apple_service_state())));
+        }
+    }
+
+    /// Store version: download Apple's installer and show the driver
+    /// package, the user installs it.
+    fn start_driver_download(&mut self) {
+        self.start_job(JobKind::Other, tr("Download Apple drivers"), move |out| {
+            let fail = |e: anyhow::Error| format!("{e:#}");
+            out.send(Msg::JobStatus(
+                tr("Downloading the iTunes installer from apple.com ...").into(),
+            ));
+            let installer = drivers::download_installer(|done, _| {
+                out.send(Msg::JobStatus(trf(
+                    "Downloading the iTunes installer ... {}",
+                    &[&HumanBytes(done)],
+                )));
+            })
+            .map_err(fail)?;
+            out.send(Msg::JobStatus(
+                tr("Unpacking the driver package ...").into(),
+            ));
+            let msi = drivers::extract_driver(&installer).map_err(fail)?;
+            let file = drivers::stage_for_manual_install(&msi).map_err(fail)?;
+            out.send(Msg::Log(format!(
+                "Driver package ready: {}",
+                file.display()
+            )));
+            drivers::reveal(&file);
+            Ok(trf(
+                "Run {} in the folder that just opened, then restart Obsidia.",
+                &[&file.file_name().unwrap_or_default().to_string_lossy()],
+            ))
+        });
     }
 
     fn start_driver_install(&mut self, remove_store: bool) {
@@ -2148,6 +2243,7 @@ impl App {
         let mut open = true;
         let mut install = None;
         let busy = self.job.is_some();
+        let service = self.apple_service;
         egui::Window::new(tr("Apple Drivers"))
             .open(&mut open)
             .collapsible(false)
@@ -2162,11 +2258,14 @@ impl App {
                      apple.com ships a different driver package that handles these transfers reliably."),
                 );
                 ui.add_space(4.0);
+                let store = updater::store_managed();
                 ui.label(
-                    RichText::new(
+                    RichText::new(if store {
+                        tr("The Microsoft Store version cannot install drivers itself. Obsidia downloads the official installer from apple.com, checks Apple's signature and opens the folder with the driver package (AppleMobileDeviceSupport64.msi). Run it there - Windows asks for administrator rights - and restart Obsidia.")
+                    } else {
                         tr("Obsidia downloads the official installer from apple.com, checks Apple's signature \
-                         and installs only Apple Mobile Device Support - not iTunes itself."),
-                    )
+                         and installs only Apple Mobile Device Support - not iTunes itself.")
+                    })
                     .weak()
                     .small(),
                 );
@@ -2188,6 +2287,14 @@ impl App {
                                 None => ui.label(RichText::new(tr("Not installed")).color(ORANGE)),
                             };
                             ui.end_row();
+                            ui.label(RichText::new(tr("Apple Mobile Device Service")).weak());
+                            match service {
+                                Some(device::ServiceState::Running) => ui.label(RichText::new(tr("Running")).color(GREEN)),
+                                Some(device::ServiceState::Stopped) => ui.label(RichText::new(tr("Not running")).color(ORANGE)),
+                                Some(device::ServiceState::Missing) => ui.label(RichText::new(tr("Not installed")).color(RED)),
+                                None => ui.label(RichText::new("-").weak()),
+                            };
+                            ui.end_row();
                             ui.label(RichText::new(tr("Store app")).weak());
                             if status.store_app {
                                 ui.label(RichText::new(tr("Apple Devices / iTunes (Store) installed")).color(ORANGE));
@@ -2197,7 +2304,7 @@ impl App {
                             ui.end_row();
                         });
                         ui.add_space(8.0);
-                        if status.store_app {
+                        if status.store_app && !store {
                             ui.checkbox(
                                 &mut panel.remove_store,
                                 tr("Remove the Store app first (recommended, it brings its own drivers)"),
@@ -2206,16 +2313,19 @@ impl App {
                     }
                 }
                 ui.add_space(8.0);
-                ui.label(
-                    RichText::new(
-                        tr("Windows asks for administrator rights. Disconnect all devices before you start."),
-                    )
-                    .weak()
-                    .small(),
-                );
-                ui.add_space(8.0);
+                if !store {
+                    ui.label(
+                        RichText::new(
+                            tr("Windows asks for administrator rights. Disconnect all devices before you start."),
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    ui.add_space(8.0);
+                }
                 ui.horizontal(|ui| {
                     let label = match panel.status.as_ref().and_then(|s| s.classic.as_ref()) {
+                        _ if store => tr("Download installer"),
                         Some(_) => tr("Reinstall drivers"),
                         None => tr("Install drivers"),
                     };
@@ -2234,7 +2344,11 @@ impl App {
         }
         if let Some(remove_store) = install {
             self.drivers = None;
-            self.start_driver_install(remove_store);
+            if updater::store_managed() {
+                self.start_driver_download();
+            } else {
+                self.start_driver_install(remove_store);
+            }
         }
     }
 
@@ -3593,6 +3707,16 @@ impl eframe::App for App {
             .show_separator_line(false)
             .frame(outer(16, 16, 10, 6))
             .show(ui, |ui| self.header(ui));
+
+        if matches!(
+            self.apple_service,
+            Some(device::ServiceState::Missing | device::ServiceState::Stopped)
+        ) {
+            egui::Panel::top("service_bar")
+                .show_separator_line(false)
+                .frame(outer(12, 12, 0, 6))
+                .show(ui, |ui| self.service_bar(ui));
+        }
 
         if self.show_update_bar() {
             egui::Panel::top("update_bar")
