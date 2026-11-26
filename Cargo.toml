@@ -1,6 +1,6 @@
 [package]
 name = "obsidia"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Obsidia - iPhone/iPad firmware flashing tool for Windows, Linux and macOS"
 license = "MIT"
