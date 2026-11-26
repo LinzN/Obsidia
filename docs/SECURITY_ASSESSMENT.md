@@ -139,6 +139,7 @@ Obsidia does not store passwords, Apple ID credentials or any other secrets.
 | `gs.apple.com` | Restore authorization (Apple signing server) | HTTPS | Device identifiers such as ECID, firmware build | `idevicerestore` |
 | `www.apple.com`, `secure-appldnld.apple.com` | Windows only, on demand: download of the official iTunes installer for the classic Apple USB drivers (*Toolbox > Apple Drivers* or the "Get Apple drivers" banner) | HTTPS | None beyond the request | Obsidia |
 | `api.github.com` | Update check (latest release) on start-up and on demand | HTTPS | None beyond the request (IP address, user agent with version) | Obsidia |
+| `apt.mirranet.de` | Linux only, if the MirraNET APT repository is configured: package index and package downloads by `apt` (signed with the MirraNET key) | HTTPS | None beyond the request | `apt` |
 | `github.com`, `objects.githubusercontent.com` / `release-assets.githubusercontent.com` | Download of an update installer and `SHA256SUMS`, only after the user clicks *Install update* | HTTPS | None beyond the request | Obsidia |
 
 - No inbound connections, no listening ports.

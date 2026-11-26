@@ -82,6 +82,18 @@ release (`obsidia-<version>-x64-store.msix`) for upload to Partner Center.
 
 ### Linux (Debian / Ubuntu)
 
+Install from the MirraNET APT repository, so `apt` keeps Obsidia up to date:
+
+```sh
+sudo install -d /etc/apt/keyrings
+sudo curl -fsSL https://apt.mirranet.de/mirranet.gpg -o /etc/apt/keyrings/mirranet.gpg
+echo "deb [signed-by=/etc/apt/keyrings/mirranet.gpg] https://apt.mirranet.de stable main" \
+    | sudo tee /etc/apt/sources.list.d/mirranet.list
+sudo apt update && sudo apt install obsidia
+```
+
+Or install a downloaded package directly:
+
 ```sh
 sudo apt install ./obsidia_<version>-1_amd64.deb
 ```
