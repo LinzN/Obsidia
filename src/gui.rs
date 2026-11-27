@@ -1232,14 +1232,24 @@ impl App {
     }
 
     /// Reads the "Find My" state in the background for the flash dialog.
+    /// Reads the "Find My" state again each time the flash dialog opens, as
+    /// it can be turned off while Obsidia is running.
     fn check_find_my(&mut self, dev: &Device) {
-        if dev.mode != Mode::Normal || self.find_my.contains_key(dev.key()) {
+        if dev.mode != Mode::Normal {
             return;
         }
         let key = dev.key().to_string();
         self.find_my.insert(key.clone(), None);
         let dev = dev.clone();
-        self.spawn(move |out| out.send(Msg::FindMy(key, media::find_my_enabled(&dev))));
+        self.spawn(move |out| {
+            let (state, raw) = media::find_my_enabled(&dev);
+            out.send(Msg::Log(format!(
+                "Find My ({}): {}",
+                dev.serial.as_deref().unwrap_or(&dev.udid),
+                if raw.is_empty() { "no answer" } else { &raw }
+            )));
+            out.send(Msg::FindMy(key, state));
+        });
     }
 
     fn find_firmware(&self, product: &str, url: &str) -> Option<Firmware> {
@@ -3605,7 +3615,7 @@ impl App {
                 if req.erase && !find_my_on.is_empty() {
                     ui.label(
                         RichText::new(trf(
-                            "\u{e4e0} \"Find My\" is on ({}). After the restore the device can only be set up with the Apple ID and password of its owner. Turn it off in Settings first if the device is handed over.",
+                            "\u{e4e0} \"Find My\" seems to be on ({}). After the restore the device can only be set up with the Apple ID and password of its owner. Turn it off in Settings first if the device is handed over.",
                             &[&find_my_on.join(", ")],
                         ))
                         .color(RED),

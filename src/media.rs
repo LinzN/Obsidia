@@ -121,27 +121,28 @@ pub fn crash_reports(dev: &Device) -> Result<(PathBuf, usize)> {
     Ok((dir, copied))
 }
 
-/// Whether "Find My" is turned on. A restored device then needs the Apple
-/// ID to be activated again (Activation Lock).
-pub fn find_my_enabled(dev: &Device) -> Option<bool> {
-    let out = device::run(
-        "ideviceinfo",
-        &[
-            "-u",
-            &dev.udid,
-            "-q",
-            "com.apple.fmip",
-            "-k",
-            "IsAssociated",
-        ],
-    )
-    .ok()
-    .flatten()?;
-    match out.trim() {
-        "true" => Some(true),
-        "false" => Some(false),
+/// Whether "Find My" is turned on, read from the `com.apple.fmip` lockdown
+/// domain. Returns the state and the raw values of the domain (for the log).
+/// A restored device with Find My on needs the owner's Apple ID to be
+/// activated again (Activation Lock).
+pub fn find_my_enabled(dev: &Device) -> (Option<bool>, String) {
+    let raw = device::run("ideviceinfo", &["-u", &dev.udid, "-q", "com.apple.fmip"])
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let values = device::parse_kv(&raw);
+    let state = match values.get("IsAssociated").map(|v| v.trim()) {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
         _ => None,
-    }
+    };
+    let raw = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (state, raw)
 }
 
 /// A running `idevicesyslog`. Dropping it stops the process.
