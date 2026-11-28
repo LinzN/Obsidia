@@ -3296,19 +3296,41 @@ impl App {
             Some(Ok(report)) => report.clone(),
         };
 
-        let width = ui.available_width();
-        let card_w = ((width - 16.0) / 2.0).clamp(300.0, 520.0);
-        ui.horizontal_top(|ui| {
+        // set_width covers the content only; the card frame adds its margin
+        // and stroke on both sides
+        const GAP: f32 = 16.0;
+        let frame = theme::surface_frame(Surface::Card).total_margin().sum().x;
+        // leave room for the scroll bar of the page
+        let width = ui.available_width() - ui.spacing().scroll.bar_width - 12.0;
+        let side_by_side = width >= 2.0 * (280.0 + frame) + GAP;
+        let card_w = if side_by_side {
+            ((width - GAP) / 2.0 - frame).min(520.0)
+        } else {
+            (width - frame).min(560.0)
+        };
+        let battery = |ui: &mut egui::Ui| {
             theme::surface(ui, Surface::Card, |ui| {
                 ui.set_width(card_w);
                 ui.vertical(|ui| battery_card(ui, report.battery.as_ref()));
             });
-            ui.add_space(16.0);
+        };
+        let hardware = |ui: &mut egui::Ui| {
             theme::surface(ui, Surface::Card, |ui| {
                 ui.set_width(card_w);
                 ui.vertical(|ui| hardware_card(ui, &report));
             });
-        });
+        };
+        if side_by_side {
+            ui.horizontal_top(|ui| {
+                battery(ui);
+                ui.add_space(GAP);
+                hardware(ui);
+            });
+        } else {
+            battery(ui);
+            ui.add_space(GAP);
+            hardware(ui);
+        }
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
