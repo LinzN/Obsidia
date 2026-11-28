@@ -121,28 +121,45 @@ pub fn crash_reports(dev: &Device) -> Result<(PathBuf, usize)> {
     Ok((dir, copied))
 }
 
-/// Whether "Find My" is turned on, read from the `com.apple.fmip` lockdown
-/// domain. Returns the state and the raw values of the domain (for the log).
+/// Whether "Find My" is turned on, read from the `IsAssociated` key of the
+/// `com.apple.fmip` lockdown domain (the device refuses to return the whole
+/// domain). Returns the state and what the tool printed, for the log.
 /// A restored device with Find My on needs the owner's Apple ID to be
 /// activated again (Activation Lock).
 pub fn find_my_enabled(dev: &Device) -> (Option<bool>, String) {
-    let raw = device::run("ideviceinfo", &["-u", &dev.udid, "-q", "com.apple.fmip"])
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let values = device::parse_kv(&raw);
-    let state = match values.get("IsAssociated").map(|v| v.trim()) {
-        Some("true") => Some(true),
-        Some("false") => Some(false),
+    let answer = device::run_full(
+        "ideviceinfo",
+        &[
+            "-u",
+            &dev.udid,
+            "-q",
+            "com.apple.fmip",
+            "-k",
+            "IsAssociated",
+        ],
+        std::time::Duration::from_secs(15),
+    );
+    let raw = match answer {
+        Ok((_, out)) => out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+        Err(e) => format!("{e:#}"),
+    };
+    let state = match raw.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
         _ => None,
     };
-    let raw = raw
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect::<Vec<_>>()
-        .join(", ");
-    (state, raw)
+    (
+        state,
+        format!(
+            "IsAssociated = {}",
+            if raw.is_empty() { "(empty)" } else { &raw }
+        ),
+    )
 }
 
 /// A running `idevicesyslog`. Dropping it stops the process.
