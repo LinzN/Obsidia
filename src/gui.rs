@@ -3615,7 +3615,7 @@ impl App {
                 if req.erase && !find_my_on.is_empty() {
                     ui.label(
                         RichText::new(trf(
-                            "\u{e4e0} \"Find My\" seems to be on ({}). After the restore the device can only be set up with the Apple ID and password of its owner. Turn it off in Settings first if the device is handed over.",
+                            "\u{e4e0} \"Find My\" is on ({}). After the restore the device can only be set up with the Apple ID and password of its owner. Turn it off in Settings first if the device is handed over.",
                             &[&find_my_on.join(", ")],
                         ))
                         .color(RED),
