@@ -260,12 +260,28 @@ jobs:
           printf '%s\n' "$APT_SSH_KEY" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
           printf '%s\n' "$APT_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          opt="-o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o Port=${APT_PORT:-22} -i $HOME/.ssh/id_deploy"
+          # One shared connection (multiplexing) for all ssh/scp calls, so a flaky
+          # connection setup only has to succeed once; retried with back-off.
+          opt="-o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o Port=${APT_PORT:-22} -i $HOME/.ssh/id_deploy -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ControlMaster=auto -o ControlPath=$HOME/.ssh/cm-%C -o ControlPersist=300"
+          connected=
+          for attempt in 1 2 3 4 5 6; do
+            if ssh $opt -fN "$APT_HOST"; then connected=1; break; fi
+            echo "::warning::SSH connection to the APT server failed (attempt $attempt), retrying in $((attempt * 20)) s"
+            sleep $((attempt * 20))
+          done
+          if [ -z "$connected" ]; then
+            echo "::error::Could not connect to the APT server. Last attempt with debug output:"
+            ssh -v $opt -o ControlMaster=no "$APT_HOST" true || true
+            exit 1
+          fi
           tmp=$(ssh $opt "$APT_HOST" mktemp -d)
           scp $opt -q packaging/apt/publish.sh debs/*.deb "$APT_HOST:$tmp/"
-          ssh $opt "$APT_HOST" bash -s -- "$tmp" "$APT_REPO" "$APT_SUITE" <<'EOF'
+          rc=0
+          ssh $opt "$APT_HOST" bash -s -- "$tmp" "$APT_REPO" "$APT_SUITE" <<'EOF' || rc=$?
           rc=0
           bash "$1/publish.sh" "$2" "$3" "$1"/*.deb || rc=$?
           rm -rf "$1"
           exit $rc
           EOF
+          ssh $opt -O exit "$APT_HOST" 2>/dev/null || true
+          exit $rc
